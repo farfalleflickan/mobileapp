@@ -1,0 +1,64 @@
+name: Build & release APK
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      JAVA_VERSION: '17'
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up JDK ${{ env.JAVA_VERSION }}
+        uses: actions/setup-java@v3
+        with:
+          distribution: temurin
+          java-version: ${{ env.JAVA_VERSION }}
+
+      - name: Cache Gradle
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+          restore-keys: gradle-
+
+      - name: Make gradlew executable
+        run: chmod +x ./gradlew
+
+      - name: Copy dummy google-services.json
+        run: cp composeApp/src/google-services-dummy.json composeApp/src/google-services.json
+
+      - name: Restore debug keystore
+        run: |
+          mkdir -p /home/runner/.config/.android/
+          printf "%s" "${{ secrets.DEBUG_KEYSTORE_B64 }}" | base64 -d > /home/runner/.config/.android/debug.keystore
+        
+      - name: Build APK
+        run: ./gradlew :composeApp:assembleDebug
+
+      - name: Set date
+        id: date
+        run: echo "date=$(date +'%Y%m%d%H%M%S')" >> $GITHUB_OUTPUT
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: nightly-${{ steps.date.outputs.date }}
+          name: v${{ steps.date.outputs.date }}
+          prerelease: false
+          generate_release_notes: true
+          files: composeApp/build/outputs/apk/debug/*.apk
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
