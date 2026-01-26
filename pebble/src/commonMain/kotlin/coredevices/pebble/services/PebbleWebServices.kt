@@ -41,6 +41,7 @@ import io.rebble.libpebblecommon.util.GeolocationPositionResult
 import io.rebble.libpebblecommon.web.LockerEntry
 import io.rebble.libpebblecommon.web.LockerEntryCompanions
 import io.rebble.libpebblecommon.web.LockerEntryCompatibility
+import io.rebble.libpebblecommon.web.LockerEntryCompatibilityWatchPlatformDetails
 import io.rebble.libpebblecommon.web.LockerEntryDeveloper
 import io.rebble.libpebblecommon.web.LockerEntryLinks
 import io.rebble.libpebblecommon.web.LockerEntryPBW
@@ -303,11 +304,6 @@ class RealPebbleWebServices(
         }
     }
 
-    suspend fun fetchAppStoreApp(id: String, hardwarePlatform: WatchType?, sourceUrl: String, useCache: Boolean = true): StoreAppResponse? {
-        val appstore = appstoreServiceForUrl(sourceUrl)
-        return appstore.fetchAppStoreApp(id, hardwarePlatform, useCache)
-    }
-
     suspend fun getWeather(location: GeolocationPositionResult.Success, units: WeatherUnit, language: String): WeatherResponse? {
         val url = "https://weather-api.repebble.com/api/v1/geocode/${location.latitude}/${location.longitude}?language=$language&units=${units.code}"
         return httpClient.get(url, auth = false)
@@ -530,6 +526,11 @@ data class StoreCollection(
 )
 
 @Serializable
+data class BulkStoreResponse(
+    val data: List<StoreApplication>
+)
+
+@Serializable
 data class StoreApplication(
     val author: String,
     val capabilities: List<String>,
@@ -546,11 +547,15 @@ data class StoreApplication(
     val description: String,
     @SerialName("developer_id")
     val developerId: String,
+    @SerialName("hardware_platforms")
+    val hardwarePlatforms: List<StoreHardwarePlatform>? = null,
 //    @SerialName("header_images")
 //    val headerImages: List<Map<String, String>>,
     val hearts: Int,
     @SerialName("icon_image")
     val iconImage: Map<String, String>,
+    @SerialName("icon_resource_id")
+    val iconResourceId: Int? = null,
     val id: String,
     @SerialName("latest_release")
     val latestRelease: StoreLatestRelease,
@@ -600,6 +605,17 @@ data class StoreLatestRelease(
 )
 
 @Serializable
+data class StoreHardwarePlatform(
+    val name: String,
+    @SerialName("sdk_version")
+    val sdkVersion: String?,
+    @SerialName("pebble_process_info_flags")
+    val pebbleProcessInfoFlags: Int?,
+    val description: String,
+    val images: Map<String, String>,
+)
+
+@Serializable
 data class StoreChangelogEntry(
     @SerialName("published_date")
     val publishedDate: String,
@@ -615,6 +631,27 @@ data class StoreChangelogEntry(
 //    val x720: String,
 //    val orig: String,
 //)
+
+private const val FALLBACK_SDK_VERSION = "5.86"
+private const val FALLBACK_ICON_RESOURCE_ID = 0
+
+fun StoreApplication.asLockerEntryPlatform(
+    platformName: String,
+    fallbackFlags: Int,
+): LockerEntryPlatform {
+    val lockerEntryPlatform = hardwarePlatforms?.firstOrNull { it.name == platformName }
+    return LockerEntryPlatform(
+        name = platformName,
+        sdkVersion = lockerEntryPlatform?.sdkVersion ?: FALLBACK_SDK_VERSION,
+        pebbleProcessInfoFlags = lockerEntryPlatform?.pebbleProcessInfoFlags ?: fallbackFlags,
+        description = description,
+        images = LockerEntryPlatformImages(
+            icon = iconImage["48x48"] ?: "",
+            list = listImage["144x144"] ?: "",
+            screenshot = screenshotImages.firstOrNull()?.values?.firstOrNull() ?: "",
+        )
+    )
+}
 
 fun StoreApplication.toLockerEntry(sourceUrl: String, timelineToken: String?): LockerEntry? {
     val app = this
@@ -639,7 +676,7 @@ fun StoreApplication.toLockerEntry(sourceUrl: String, timelineToken: String?): L
                     it
                 }
             },
-            iconResourceId = 0,
+            iconResourceId = app.iconResourceId ?: FALLBACK_ICON_RESOURCE_ID,
             releaseId = ""
         ),
         links = LockerEntryLinks("", "", ""),
@@ -648,106 +685,39 @@ fun StoreApplication.toLockerEntry(sourceUrl: String, timelineToken: String?): L
         category = app.category,
         userToken = timelineToken,
         hardwarePlatforms = buildList {
-            var flags = 0
+            var fallbackFlags = 0
             if (app.type == AppType.Watchface.code) {
-                flags = flags or (0x1 shl 0)
+                fallbackFlags = fallbackFlags or (0x1 shl 0)
             }
             app.compatibility.aplite.takeIf { it.supported }?.let {
-                val flagsFinal = flags or (0x1 shl 6)
-                add(
-                    LockerEntryPlatform(
-                        name = "aplite",
-                        sdkVersion = "5.86", //TODO: grab from API if we can
-                        pebbleProcessInfoFlags = flagsFinal, //TODO: ditto
-                        description = app.description,
-                        images = LockerEntryPlatformImages(
-                            icon = app.iconImage["48x48"] ?: "",
-                            list = app.listImage["144x144"] ?: "",
-                            screenshot = app.screenshotImages.firstOrNull()?.values?.firstOrNull() ?: "",
-                        )
-                    )
-                )
+                val fallbackFlagsFinal = fallbackFlags or (0x1 shl 6)
+                add(app.asLockerEntryPlatform("aplite", fallbackFlagsFinal))
             }
             app.compatibility.basalt.takeIf { it.supported }?.let {
-                val flagsFinal = flags or (0x2 shl 6)
-                add(
-                    LockerEntryPlatform(
-                        name = "basalt",
-                        sdkVersion = "5.86", //TODO
-                        pebbleProcessInfoFlags = flagsFinal,
-                        description = app.description,
-                        images = LockerEntryPlatformImages(
-                            icon = app.iconImage["48x48"] ?: "",
-                            list = app.listImage["144x144"] ?: "",
-                            screenshot = app.screenshotImages.firstOrNull()?.values?.firstOrNull() ?: "",
-                        )
-                    )
-                )
+                val fallbackFlagsFinal = fallbackFlags or (0x2 shl 6)
+                add(app.asLockerEntryPlatform("basalt", fallbackFlagsFinal))
             }
             app.compatibility.chalk.takeIf { it.supported }?.let {
-                val flagsFinal = flags or (0x3 shl 6)
-                add(
-                    LockerEntryPlatform(
-                        name = "chalk",
-                        sdkVersion = "5.86",
-                        pebbleProcessInfoFlags = flagsFinal,
-                        description = app.description,
-                        images = LockerEntryPlatformImages(
-                            icon = app.iconImage["48x48"] ?: "",
-                            list = app.listImage["144x144"] ?: "",
-                            screenshot = app.screenshotImages.firstOrNull()?.values?.firstOrNull() ?: "",
-                        )
-                    )
-                )
+                val fallbackFlagsFinal = fallbackFlags or (0x3 shl 6)
+                add(app.asLockerEntryPlatform("chalk", fallbackFlagsFinal))
             }
             app.compatibility.diorite.takeIf { it.supported }?.let {
-                val flagsFinal = flags or (0x4 shl 6)
-                add(
-                    LockerEntryPlatform(
-                        name = "diorite",
-                        sdkVersion = "5.86",
-                        pebbleProcessInfoFlags = flagsFinal,
-                        description = app.description,
-                        images = LockerEntryPlatformImages(
-                            icon = app.iconImage["48x48"] ?: "",
-                            list = app.listImage["144x144"] ?: "",
-                            screenshot = app.screenshotImages.firstOrNull()?.values?.firstOrNull() ?: "",
-                        )
-                    )
-                )
+                val fallbackFlagsFinal = fallbackFlags or (0x4 shl 6)
+                add(app.asLockerEntryPlatform("diorite", fallbackFlagsFinal))
             }
             app.compatibility.emery.takeIf { it.supported }?.let {
-                val flagsFinal = flags or (0x5 shl 6)
-                add(
-                    LockerEntryPlatform(
-                        name = "emery",
-                        sdkVersion = "5.86",
-                        pebbleProcessInfoFlags = flagsFinal,
-                        description = app.description,
-                        images = LockerEntryPlatformImages(
-                            icon = app.iconImage["48x48"] ?: "",
-                            list = app.listImage["144x144"] ?: "",
-                            screenshot = app.screenshotImages.firstOrNull()?.values?.firstOrNull() ?: "",
-                        )
-                    )
-                )
+                val fallbackFlagsFinal = fallbackFlags or (0x5 shl 6)
+                add(app.asLockerEntryPlatform("emery", fallbackFlagsFinal))
             }
             app.compatibility.flint.takeIf { it?.supported ?: false }?.let {
-                val flagsFinal = flags or (0x6 shl 6)
-                add(
-                    LockerEntryPlatform(
-                        name = "flint",
-                        sdkVersion = "5.86",
-                        pebbleProcessInfoFlags = flagsFinal,
-                        description = app.description,
-                        images = LockerEntryPlatformImages(
-                            icon = app.iconImage["48x48"] ?: "",
-                            list = app.listImage["144x144"] ?: "",
-                            screenshot = app.screenshotImages.firstOrNull()?.values?.firstOrNull() ?: "",
-                        )
-                    )
-                )
+                val fallbackFlagsFinal = fallbackFlags or (0x6 shl 6)
+                add(app.asLockerEntryPlatform("flint", fallbackFlagsFinal))
             }
-        }
+            app.compatibility.gabbro.takeIf { it?.supported ?: false }?.let {
+                val fallbackFlagsFinal = fallbackFlags or (0x6 shl 7)
+                add(app.asLockerEntryPlatform("gabbro", fallbackFlagsFinal))
+            }
+        },
+        source = sourceUrl,
     )
 }

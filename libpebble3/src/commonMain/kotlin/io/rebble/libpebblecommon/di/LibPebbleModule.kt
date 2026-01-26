@@ -45,6 +45,7 @@ import io.rebble.libpebblecommon.connection.TokenProvider
 import io.rebble.libpebblecommon.connection.TransportConnector
 import io.rebble.libpebblecommon.connection.WatchConnector
 import io.rebble.libpebblecommon.connection.WatchManager
+import io.rebble.libpebblecommon.connection.WatchPrefs
 import io.rebble.libpebblecommon.connection.WebServices
 import io.rebble.libpebblecommon.connection.bt.BluetoothStateProvider
 import io.rebble.libpebblecommon.connection.bt.RealBluetoothStateProvider
@@ -92,12 +93,14 @@ import io.rebble.libpebblecommon.database.Database
 import io.rebble.libpebblecommon.database.RealBlobDbDatabaseManager
 import io.rebble.libpebblecommon.database.dao.LockerEntryRealDao
 import io.rebble.libpebblecommon.database.dao.NotificationAppRealDao
+import io.rebble.libpebblecommon.database.dao.RealWatchPrefs
 import io.rebble.libpebblecommon.database.dao.TimelineNotificationRealDao
 import io.rebble.libpebblecommon.database.entity.LockerEntryDao
 import io.rebble.libpebblecommon.database.entity.NotificationAppItemDao
 import io.rebble.libpebblecommon.database.entity.TimelineNotificationDao
 import io.rebble.libpebblecommon.database.getRoomDatabase
 import io.rebble.libpebblecommon.datalogging.Datalogging
+import io.rebble.libpebblecommon.datalogging.HealthDataProcessor
 import io.rebble.libpebblecommon.health.Health
 import io.rebble.libpebblecommon.js.JsTokenUtil
 import io.rebble.libpebblecommon.js.RemoteTimelineEmulator
@@ -113,6 +116,7 @@ import io.rebble.libpebblecommon.services.AppReorderService
 import io.rebble.libpebblecommon.services.AudioStreamService
 import io.rebble.libpebblecommon.services.DataLoggingService
 import io.rebble.libpebblecommon.services.GetBytesService
+import io.rebble.libpebblecommon.services.HealthService
 import io.rebble.libpebblecommon.services.LogDumpService
 import io.rebble.libpebblecommon.services.MusicService
 import io.rebble.libpebblecommon.services.PhoneControlService
@@ -318,11 +322,15 @@ fun initKoin(
                 single { get<Database>().timelinePinDao() }
                 single { get<Database>().timelineReminderDao() }
                 single { get<Database>().calendarDao() }
-                single { get<Database>().watchSettingsDao() }
+                single { get<Database>().healthSettingsDao() }
                 single { get<Database>().lockerAppPermissionDao() }
                 single { get<Database>().notificationsDao() }
                 single { get<Database>().contactDao() }
                 single { get<Database>().vibePatternDao() }
+                single { get<Database>().healthDao() }
+                single { get<Database>().healthStatDao() }
+                singleOf(::HealthDataProcessor)
+                single { get<Database>().watchPrefDao() }
                 singleOf(::WatchManager) bind WatchConnector::class
                 single { bleScanner() }
                 singleOf(::RealScanning) bind Scanning::class
@@ -331,12 +339,14 @@ fun initKoin(
                 singleOf(::PrivateLogger)
                 singleOf(::Housekeeping)
                 singleOf(::RemoteTimelineEmulator)
+                singleOf(::RealWatchPrefs) bind WatchPrefs::class
                 singleOf(::WebSyncManager) bind RequestSync::class
                 singleOf(::TimelineApi) bind Timeline::class
                 single { WebSyncManagerProvider { get() } }
                 single { createTimeChanged(get()) }
                 single {
                     LibPebble3(
+                        get(),
                         get(),
                         get(),
                         get(),
@@ -455,7 +465,7 @@ fun initKoin(
                             get(), get(), get(),
                             get(), get(), get(),
                             get(), get(), get(),
-                            get(), get(), get(),
+                            get(), get(), get(), get(),
                         )
                     } bind PebbleConnector::class
                     scopedOf(::PebbleProtocolRunner)
@@ -496,6 +506,7 @@ fun initKoin(
                     scopedOf(::VoiceService)
                     scopedOf(::AudioStreamService)
                     scopedOf(::AppReorderService)
+                    scopedOf(::HealthService)
 
                     // Endpoint Managers
                     scopedOf(::PutBytesSession)

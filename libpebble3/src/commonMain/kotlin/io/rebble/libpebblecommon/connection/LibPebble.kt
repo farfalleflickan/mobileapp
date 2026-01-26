@@ -23,6 +23,7 @@ import io.rebble.libpebblecommon.database.dao.ChannelAndCount
 import io.rebble.libpebblecommon.database.dao.ContactWithCount
 import io.rebble.libpebblecommon.database.dao.TimelineNotificationRealDao
 import io.rebble.libpebblecommon.database.dao.VibePatternDao
+import io.rebble.libpebblecommon.database.dao.WatchPreference
 import io.rebble.libpebblecommon.database.entity.CalendarEntity
 import io.rebble.libpebblecommon.database.entity.MuteState
 import io.rebble.libpebblecommon.database.entity.NotificationEntity
@@ -32,6 +33,7 @@ import io.rebble.libpebblecommon.di.LibPebbleCoroutineScope
 import io.rebble.libpebblecommon.di.initKoin
 import io.rebble.libpebblecommon.health.Health
 import io.rebble.libpebblecommon.health.HealthSettings
+import io.rebble.libpebblecommon.health.HealthDebugStats
 import io.rebble.libpebblecommon.js.JsTokenUtil
 import io.rebble.libpebblecommon.locker.AppBasicProperties
 import io.rebble.libpebblecommon.locker.AppType
@@ -73,7 +75,7 @@ sealed class PebbleConnectionEvent {
 
 @Stable
 interface LibPebble : Scanning, RequestSync, LockerApi, NotificationApps, CallManagement, Calendar,
-    OtherPebbleApps, PKJSToken, Watches, Errors, Contacts, AnalyticsEvents, HealthApi,
+    OtherPebbleApps, PKJSToken, Watches, Errors, Contacts, AnalyticsEvents, HealthApi, WatchPrefs,
     SystemGeolocation, Timeline, Vibrations {
     fun init()
 
@@ -116,6 +118,9 @@ data class OtherPebbleApp(
 interface HealthApi {
     val healthSettings: Flow<HealthSettings>
     fun updateHealthSettings(healthSettings: HealthSettings)
+    suspend fun getHealthDebugStats(): HealthDebugStats
+    fun requestHealthData(fullSync: Boolean = false)
+    fun sendHealthAveragesToWatch()
 }
 
 interface Timeline {
@@ -137,6 +142,11 @@ data class AnalyticsEvent(
 
 interface AnalyticsEvents {
     val analyticsEvents: Flow<AnalyticsEvent>
+}
+
+interface WatchPrefs {
+    val watchPrefs: Flow<List<WatchPreference<*>>>
+    fun setWatchPref(watchPref: WatchPreference<*>)
 }
 
 interface Watches {
@@ -204,6 +214,7 @@ interface LockerApi {
     suspend fun waitUntilAppSyncedToWatch(id: Uuid, identifier: PebbleIdentifier, timeout: Duration): Boolean
     suspend fun removeApp(id: Uuid): Boolean
     suspend fun addAppToLocker(app: LockerEntry)
+    fun restoreSystemAppOrder()
 }
 
 interface Contacts {
@@ -288,12 +299,13 @@ class LibPebble3(
     private val timeline: Timeline,
     private val legacyPhoneReceiver: LegacyPhoneReceiver,
     private val vibePatternDao: VibePatternDao,
+    private val watchPreferences: WatchPrefs,
 ) : LibPebble, Scanning by scanning, RequestSync by webSyncManager, LockerApi by locker,
     NotificationApps by notificationApi, Calendar by phoneCalendarSyncer,
     OtherPebbleApps by otherPebbleApps, PKJSToken by jsTokenUtil, Watches by watchManager,
     Errors by errorTracker, Contacts by contacts, AnalyticsEvents by analytics,
     HealthApi by health, SystemGeolocation by systemGeolocation, Timeline by timeline,
-    Vibrations by notificationApi {
+    Vibrations by notificationApi, WatchPrefs by watchPreferences {
     private val logger = Logger.withTag("LibPebble3")
     private val initialized = AtomicBoolean(false)
 
@@ -315,6 +327,7 @@ class LibPebble3(
             libPebbleCoroutineScope.launch { forEachConnectedWatch { updateTime() } }
         }
         housekeeping.init()
+        health.init()
         legacyPhoneReceiver.init(currentCall)
         libPebbleCoroutineScope.launch {
             vibePatternDao.ensureAllDefaultsInserted()
@@ -356,7 +369,7 @@ class LibPebble3(
     }
 
     override fun doStuffAfterPermissionsGranted() {
-        phoneCalendarSyncer.init()
+        phoneCalendarSyncer.handlePermissionsGranted()
         missedCallSyncer.init()
         phoneContactsSyncer.init()
     }
