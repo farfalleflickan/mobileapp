@@ -7,12 +7,17 @@ import com.algolia.client.api.SearchClient
 import com.algolia.client.exception.AlgoliaApiException
 import com.algolia.client.model.search.SearchParamsObject
 import com.algolia.client.model.search.TagFilters
+import coredevices.database.AppstoreCollection
+import coredevices.database.AppstoreCollectionDao
 import coredevices.database.AppstoreSource
 import coredevices.pebble.Platform
 import coredevices.pebble.account.FirestoreLockerEntry
 import coredevices.pebble.services.AppstoreService.BulkFetchParams.Companion.encodeToJson
 import coredevices.pebble.ui.CommonApp
+import coredevices.pebble.ui.DEFAULT_CATEGORIES_APPS
+import coredevices.pebble.ui.DEFAULT_CATEGORIES_FACES
 import coredevices.pebble.ui.asCommonApp
+import coredevices.pebble.ui.cachedCategoriesOrDefaults
 import io.ktor.client.HttpClient
 import io.ktor.client.call.body
 import io.ktor.client.plugins.HttpTimeout
@@ -44,6 +49,7 @@ class AppstoreService(
     httpClient: HttpClient,
     val source: AppstoreSource,
     private val cache: AppstoreCache,
+    private val appstoreCollectionDao: AppstoreCollectionDao,
 ) {
     private val scope = CoroutineScope(Dispatchers.Default)
 
@@ -178,7 +184,7 @@ class AppstoreService(
         return result
     }
 
-    suspend fun fetchAppStoreHome(type: AppType, hardwarePlatform: WatchType?): AppStoreHome? {
+    suspend fun fetchAppStoreHome(type: AppType, hardwarePlatform: WatchType?, useCache: Boolean): AppStoreHome? {
         val typeString = type.storeString()
         val parameters = buildMap {
             set("platform", platform.storeString())
@@ -187,6 +193,12 @@ class AppstoreService(
             }
 //            set("firmware_version", "")
             set("filter_hardware", "true")
+        }
+        if (useCache) {
+            val cacheHit = cache.readHome(type, source, parameters)
+            if (cacheHit != null) {
+                return cacheHit
+            }
         }
         val home = try {
             httpClient.get(
@@ -211,6 +223,16 @@ class AppstoreService(
             }?.body<AppStoreHome>()
         home?.let {
             cache.writeCategories(home.categories, type, source)
+            appstoreCollectionDao.updateListOfCollections(type, home.collections.map {
+                AppstoreCollection(
+                    sourceId = source.id,
+                    title = it.name,
+                    slug = it.slug,
+                    type = type,
+                    enabled = true,
+                )
+            }, sourceId = source.id)
+            cache.writeHome(home, type, source, parameters)
         }
         return home?.copy(applications = home.applications.filter { app ->
             try {
@@ -227,16 +249,8 @@ class AppstoreService(
         })
     }
 
-    suspend fun fetchCategories(type: AppType): List<StoreCategory>? {
-        val cacheHit = cache.readCategories(type, source)
-        if (cacheHit != null) {
-            return cacheHit
-        }
-        val categories = fetchAppStoreHome(type, null)?.categories
-        if (categories != null) {
-            cache.writeCategories(categories, type, source)
-        }
-        return categories
+    suspend fun cachedCategoriesOrDefaults(appType: AppType?): List<StoreCategory> {
+        return source.cachedCategoriesOrDefaults(appType, cache)
     }
 
     fun fetchAppStoreCollection(
@@ -261,18 +275,7 @@ class AppstoreService(
                 }
                 logger.v { "get ${url} with parameters $parameters" }
                 val categories = scope.async {
-                    appType?.let {
-                        fetchCategories(appType)
-                    } ?: run {
-                        buildList {
-                            addAll(
-                                fetchCategories(AppType.Watchface) ?: emptyList()
-                            )
-                            addAll(
-                                fetchCategories(AppType.Watchapp) ?: emptyList()
-                            )
-                        }
-                    }
+                    cachedCategoriesOrDefaults(appType)
                 }
                 return try {
                     val response = httpClient.get(url = Url(url)) {

@@ -117,7 +117,6 @@ import io.rebble.libpebblecommon.connection.AppContext
 import io.rebble.libpebblecommon.connection.ConnectedPebble
 import io.rebble.libpebblecommon.connection.KnownPebbleDevice
 import io.rebble.libpebblecommon.connection.LibPebble
-import io.rebble.libpebblecommon.health.HealthSettings
 import io.rebble.libpebblecommon.js.PKJSApp
 import io.rebble.libpebblecommon.packets.ProtocolCapsFlag
 import kotlinx.coroutines.Dispatchers
@@ -581,7 +580,7 @@ please disable the option.""".trimIndent(),
                     title = "Configure Appstore Sources",
                     topLevelType = TopLevelType.Phone,
                     section = Section.Default,
-                    action = { navBarNav.navigateTo(PebbleRoutes.AppstoreSettingsRoute) },
+                    action = { navBarNav.navigateTo(PebbleNavBarRoutes.AppstoreSettingsRoute) },
                     show = { coreConfig.useNativeAppStore },
                 ),
                 basicSettingsDropdownItem(
@@ -865,14 +864,65 @@ please disable the option.""".trimIndent(),
                     },
                     show = { false },
                 ),
+                basicSettingsToggleItem(
+                    title = "Enable Calendar",
+                    description = "Show calendar pins on timeline",
+                    topLevelType = TopLevelType.Phone,
+                    section = Section.Calendar,
+                    checked = libPebbleConfig.watchConfig.calendarPins,
+                    onCheckChanged = {
+                        libPebble.updateConfig(
+                            libPebbleConfig.copy(
+                                watchConfig = libPebbleConfig.watchConfig.copy(
+                                    calendarPins = it
+                                )
+                            )
+                        )
+                    },
+                ),
+                basicSettingsToggleItem(
+                    title = "Calendar Reminders",
+                    description = "Alerts before calendar events",
+                    topLevelType = TopLevelType.Phone,
+                    section = Section.Calendar,
+                    checked = libPebbleConfig.watchConfig.calendarReminders,
+                    onCheckChanged = {
+                        libPebble.updateConfig(
+                            libPebbleConfig.copy(
+                                watchConfig = libPebbleConfig.watchConfig.copy(
+                                    calendarReminders = it
+                                )
+                            )
+                        )
+                    },
+                    show = { libPebbleConfig.watchConfig.calendarPins },
+                ),
+                basicSettingsToggleItem(
+                    title = "Declined Events",
+                    description = "Display declined calendar events",
+                    topLevelType = TopLevelType.Phone,
+                    section = Section.Calendar,
+                    checked = libPebbleConfig.watchConfig.calendarShowDeclinedEvents,
+                    onCheckChanged = {
+                        libPebble.updateConfig(
+                            libPebbleConfig.copy(
+                                watchConfig = libPebbleConfig.watchConfig.copy(
+                                    calendarShowDeclinedEvents = it
+                                )
+                            )
+                        )
+                    },
+                    show = { libPebbleConfig.watchConfig.calendarPins },
+                ),
                 basicSettingsActionItem(
-                    title = "Calendar Settings",
-                    description = "",
+                    title = "Calendars",
+                    description = "Configure which calendars to display",
                     topLevelType = TopLevelType.Phone,
                     section = Section.Calendar,
                     action = {
-                        navBarNav.navigateTo(PebbleRoutes.CalendarsRoute)
+                        navBarNav.navigateTo(PebbleNavBarRoutes.CalendarsRoute)
                     },
+                    show = { libPebbleConfig.watchConfig.calendarPins },
                 ),
                 basicSettingsToggleItem(
                     title = "Enable Health",
@@ -925,8 +975,23 @@ please disable the option.""".trimIndent(),
                     show = { debugOptionsEnabled },
                 ),
                 basicSettingsToggleItem(
+                    title = "Enable Weather",
+                    description = "Fetch weather for the current location, for the Weather App (requires location permission)",
+                    topLevelType = TopLevelType.Phone,
+                    section = Section.Weather,
+                    checked = coreConfig.fetchWeather,
+                    onCheckChanged = {
+                        coreConfigHolder.update(
+                            coreConfig.copy(
+                                fetchWeather = it,
+                            )
+                        )
+                        GlobalScope.launch { weatherFetcher.fetchWeather() }
+                    },
+                ),
+                basicSettingsToggleItem(
                     title = "Weather Pins",
-                    description = "Add weather pins to timeline for the current location (requires location permissions)",
+                    description = "Add weather pins to timeline",
                     topLevelType = TopLevelType.Phone,
                     section = Section.Weather,
                     checked = coreConfig.weatherPinsV2,
@@ -938,6 +1003,7 @@ please disable the option.""".trimIndent(),
                         )
                         GlobalScope.launch { weatherFetcher.fetchWeather() }
                     },
+                    show = { coreConfig.fetchWeather }
                 ),
                 basicSettingsDropdownItem(
                     title = "Units",
@@ -955,6 +1021,17 @@ please disable the option.""".trimIndent(),
                         GlobalScope.launch { weatherFetcher.fetchWeather() }
                     },
                     itemText = { it.name },
+                    show = { coreConfig.fetchWeather }
+                ),
+                basicSettingsActionItem(
+                    title = "Locations",
+                    description = "Configure weather locations",
+                    topLevelType = TopLevelType.Phone,
+                    section = Section.Weather,
+                    action = {
+                        navBarNav.navigateTo(PebbleNavBarRoutes.WeatherRoute)
+                    },
+                    show = { coreConfig.fetchWeather }
                 ),
                 basicSettingsToggleItem(
                     title = "Use LAN developer connection",

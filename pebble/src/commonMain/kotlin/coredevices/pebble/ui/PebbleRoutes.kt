@@ -30,17 +30,11 @@ object PebbleRoutes {
     data class FirmwareSideloadRoute(val identifier: String) : CoreRoute
 
     @Serializable
-    data object CalendarsRoute : CoreRoute
-
-    @Serializable
     data class WatchappSettingsRoute(
         val watchIdentifier: String,
         val title: String,
         val url: String
     ) : CoreRoute
-
-    @Serializable
-    data object AppstoreSettingsRoute : CoreRoute
 }
 
 @Stable
@@ -85,6 +79,9 @@ object PebbleNavBarRoutes {
     data object IndexRoute : NavBarRoute
 
     @Serializable
+    data object AppstoreSettingsRoute : NavBarRoute
+
+    @Serializable
     data class NotificationAppRoute(val packageName: String) : NavBarRoute
 
     @Serializable
@@ -92,6 +89,12 @@ object PebbleNavBarRoutes {
 
     @Serializable
     data object PermissionsRoute : NavBarRoute
+
+    @Serializable
+    data object CalendarsRoute : NavBarRoute
+
+    @Serializable
+    data object WeatherRoute : NavBarRoute
 
     @Serializable
     data class AppStoreRoute(val appType: String?, val deepLinkId: String?) : NavBarRoute
@@ -242,6 +245,15 @@ fun NavGraphBuilder.addNavBarRoutes(
             type = MyCollectionType.fromCode(route.myCollectionType)!!,
         )
     }
+    composable<PebbleNavBarRoutes.CalendarsRoute> {
+        CalendarScreen(nav, topBarParams)
+    }
+    composable<PebbleNavBarRoutes.WeatherRoute> {
+        WeatherScreen(nav, topBarParams)
+    }
+    composable<PebbleNavBarRoutes.AppstoreSettingsRoute> {
+        AppstoreSettingsScreen(nav, topBarParams)
+    }
 }
 
 fun NavGraphBuilder.addPebbleRoutes(coreNav: CoreNav, indexScreen: @Composable (TopBarParams, NavBarNav) -> Unit) {
@@ -252,9 +264,6 @@ fun NavGraphBuilder.addPebbleRoutes(coreNav: CoreNav, indexScreen: @Composable (
         val route: PebbleRoutes.FirmwareSideloadRoute = it.toRoute()
         DebugFirmwareSideload(route.identifier, coreNav)
     }
-    composable<PebbleRoutes.CalendarsRoute> {
-        CalendarScreen(coreNav)
-    }
     composable<PebbleRoutes.WatchappSettingsRoute> {
         val route: PebbleRoutes.WatchappSettingsRoute = it.toRoute()
         WatchappSettingsScreen(
@@ -263,8 +272,5 @@ fun NavGraphBuilder.addPebbleRoutes(coreNav: CoreNav, indexScreen: @Composable (
             title = route.title,
             url = route.url,
         )
-    }
-    composable<PebbleRoutes.AppstoreSettingsRoute> {
-        AppstoreSettingsScreen(coreNav, topBarParams = null)
     }
 }

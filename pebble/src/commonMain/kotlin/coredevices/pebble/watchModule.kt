@@ -36,6 +36,8 @@ import coredevices.pebble.ui.NotificationAppsScreenViewModel
 import coredevices.pebble.ui.NotificationScreenViewModel
 import coredevices.pebble.ui.WatchHomeViewModel
 import coredevices.pebble.weather.WeatherFetcher
+import dev.jordond.compass.geocoder.Geocoder
+import dev.jordond.compass.geocoder.MobileGeocoder
 import io.ktor.client.HttpClient
 import io.ktor.client.plugins.contentnegotiation.ContentNegotiation
 import io.ktor.serialization.kotlinx.json.json
@@ -94,8 +96,9 @@ val watchModule = module {
     singleOf(::FirestoreLockerDao)
     singleOf(::FirestoreLocker)
     singleOf(::AppstoreCache)
+    single { MobileGeocoder() } bind Geocoder::class
     factory { p ->
-        AppstoreService(get(), get(), p.get(), get())
+        AppstoreService(get(), get(), p.get(), get(), get())
     }
     factoryOf(::RealBootConfigProvider) bind BootConfigProvider::class
     factoryOf(::RealPebbleWebServices) bind WebServices::class

@@ -34,6 +34,7 @@ import androidx.compose.material.icons.automirrored.filled.DirectionsRun
 import androidx.compose.material.icons.automirrored.filled.QueueMusic
 import androidx.compose.material.icons.filled.AccessAlarm
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Cloud
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.MonitorHeart
 import androidx.compose.material.icons.filled.NotificationsActive
@@ -107,7 +108,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.IO
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -137,12 +137,12 @@ class LockerViewModel(
     val storeHome = mutableStateOf<List<Pair<AppstoreSource, AppStoreHome?>>>(emptyList())
     val storeSearchResults = MutableStateFlow<List<CommonApp>>(emptyList())
 
-    fun refreshStore(type: AppType, platform: WatchType): Deferred<Unit> {
+    fun refreshStore(type: AppType, platform: WatchType, useCache: Boolean): Deferred<Unit> {
         val finished = CompletableDeferred<Unit>()
         viewModelScope.launch {
-            val result = withContext(Dispatchers.IO) { pebbleWebServices.fetchAppStoreHome(type, platform) }
+            val result = withContext(Dispatchers.IO) { pebbleWebServices.fetchAppStoreHome(type, platform, enabledOnly = true, useCache = useCache) }
             if (!result.all { it.second == null }) {
-                val collectionRules = collectionsDao.getAllCollections().first().groupBy { it.sourceId }
+                val collectionRules = collectionsDao.getAllCollections().groupBy { it.sourceId }
                 storeHome.value = result.map { (source, home) ->
                     val homeFiltered = home?.let {
                         val default = source.id == result.first().first.id
@@ -241,7 +241,7 @@ fun LockerScreen(
                 if (viewModel.storeHome.value.isEmpty()) {
                     logger.v { "refreshing store" }
                     isRefreshing = true
-                    viewModel.refreshStore(type, watchType).invokeOnCompletion {
+                    viewModel.refreshStore(type, watchType, useCache = true).invokeOnCompletion {
                         isRefreshing = false
                     }
                 }
@@ -357,7 +357,7 @@ fun LockerScreen(
                     logger.v { "set isRefreshing to true" }
                     val lockerFinished = libPebble.requestLockerSync()
                     val storeFinished = if (coreConfig.useNativeAppStore) {
-                        viewModel.refreshStore(type, watchType)
+                        viewModel.refreshStore(type, watchType, useCache = false)
                     } else {
                         CompletableDeferred(Unit)
                     }
@@ -979,6 +979,7 @@ fun AppImage(entry: CommonApp, modifier: Modifier, size: Dp) {
                 SystemApps.Workout -> Icons.AutoMirrored.Filled.DirectionsRun
                 SystemApps.Watchfaces -> Icons.Default.Watch
                 SystemApps.Health -> Icons.Default.MonitorHeart
+                SystemApps.Weather -> Icons.Default.Cloud
             }
             Icon(icon, contentDescription = null, modifier = modifier.size(size))
         }
