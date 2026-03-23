@@ -53,6 +53,7 @@ import io.rebble.libpebblecommon.connection.bt.ble.pebble.BatteryWatcher
 import io.rebble.libpebblecommon.connection.bt.ble.pebble.ConnectionParams
 import io.rebble.libpebblecommon.connection.bt.ble.pebble.ConnectivityWatcher
 import io.rebble.libpebblecommon.connection.bt.ble.pebble.Mtu
+import io.rebble.libpebblecommon.connection.bt.ble.pebble.PPoGReset
 import io.rebble.libpebblecommon.connection.bt.ble.pebble.PebbleBle
 import io.rebble.libpebblecommon.connection.bt.ble.pebble.PebblePairing
 import io.rebble.libpebblecommon.connection.bt.ble.pebble.PpogClient
@@ -66,6 +67,7 @@ import io.rebble.libpebblecommon.connection.bt.ble.transport.GattServerManager
 import io.rebble.libpebblecommon.connection.bt.ble.transport.bleScanner
 import io.rebble.libpebblecommon.connection.bt.ble.transport.impl.KableGattConnector
 import io.rebble.libpebblecommon.connection.bt.classic.pebble.PebbleBtClassic
+import io.rebble.libpebblecommon.connection.devconnection.CloudpebbleProxyProtocolVersion
 import io.rebble.libpebblecommon.connection.devconnection.DevConnectionCloudpebbleProxy
 import io.rebble.libpebblecommon.connection.devconnection.DevConnectionManager
 import io.rebble.libpebblecommon.connection.devconnection.DevConnectionServer
@@ -102,6 +104,8 @@ import io.rebble.libpebblecommon.database.getRoomDatabase
 import io.rebble.libpebblecommon.datalogging.Datalogging
 import io.rebble.libpebblecommon.datalogging.HealthDataProcessor
 import io.rebble.libpebblecommon.health.Health
+import io.rebble.libpebblecommon.js.HttpInterceptorManager
+import io.rebble.libpebblecommon.js.InjectedPKJSHttpInterceptors
 import io.rebble.libpebblecommon.js.JsTokenUtil
 import io.rebble.libpebblecommon.js.RemoteTimelineEmulator
 import io.rebble.libpebblecommon.locker.Locker
@@ -310,7 +314,8 @@ fun initKoin(
     appContext: AppContext,
     tokenProvider: TokenProvider,
     proxyTokenProvider: StateFlow<String?>,
-    transcriptionProvider: TranscriptionProvider
+    transcriptionProvider: TranscriptionProvider,
+    injectedPKJSHttpInterceptors: InjectedPKJSHttpInterceptors,
 ): Koin {
     val koin = LibPebbleKoinContext.koin
     val libPebbleScope = LibPebbleCoroutineScope(CoroutineName("libpebble3"))
@@ -330,6 +335,7 @@ fun initKoin(
                 single { webServices }
                 single { tokenProvider }
                 single { transcriptionProvider }
+                single { injectedPKJSHttpInterceptors }
                 single { getRoomDatabase(get()) }
                 singleOf(::StaticLockerPBWCache) bind LockerPBWCache::class
                 singleOf(::PebbleDeviceFactory)
@@ -360,6 +366,7 @@ fun initKoin(
                 singleOf(::Housekeeping)
                 singleOf(::RemoteTimelineEmulator)
                 singleOf(::WeatherManager)
+                singleOf(::HttpInterceptorManager)
                 singleOf(::RealWatchPrefs) bind WatchPrefs::class
                 singleOf(::WebSyncManager) bind RequestSync::class
                 singleOf(::TimelineApi) bind Timeline::class
@@ -409,7 +416,8 @@ fun initKoin(
                 single {
                     DevConnectionCloudpebbleProxy(
                         libPebble = get(),
-                        url = "wss://cloudpebble-proxy.repebble.com/device",
+                        url = "wss://cloudpebble-proxy.repebble.com/device-v2",
+                        protocolVersion = CloudpebbleProxyProtocolVersion.V2,
                         scope = get(),
                         token = proxyTokenProvider
                     )
@@ -510,6 +518,7 @@ fun initKoin(
                     scopedOf(::PebblePairing)
                     scopedOf(::RealPebbleProtocolHandler) bind PebbleProtocolHandler::class
                     scopedOf(::PreConnectScanner)
+                    scopedOf(::PPoGReset)
 
                     // Services
                     scopedOf(::SystemService)

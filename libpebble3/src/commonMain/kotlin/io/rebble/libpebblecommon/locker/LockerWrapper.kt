@@ -17,6 +17,20 @@ enum class AppType(val code: String) {
     }
 }
 
+enum class AppCapability(val code: String) {
+    Health("health"),
+    Location("location"),
+    Timeline("timeline"),
+    // Not included: "configurable" (separate field in database, doesn't require permission grant)
+    ;
+
+    companion object {
+        fun fromString(values: List<String>?): List<AppCapability> = values?.mapNotNull { value ->
+            entries.firstOrNull { it.code == value }
+        } ?: emptyList()
+    }
+}
+
 @Immutable
 data class AppPlatform(
     val watchType: WatchType,
@@ -41,6 +55,7 @@ data class AppProperties(
     val order: Int,
     val sourceLink: String?,
     val storeId: String?,
+    val capabilities: List<AppCapability>,
 )
 
 data class AppBasicProperties(
@@ -68,6 +83,6 @@ sealed class LockerWrapper {
 }
 
 fun LockerWrapper.findCompatiblePlatform(watchType: WatchType?): AppPlatform? {
-    return properties.platforms.firstOrNull { it.watchType == watchType } ?:
-    properties.platforms.firstOrNull { watchType?.getCompatibleAppVariants()?.contains(it.watchType) == true }
+    val useWatchType = watchType?.getBestVariant(properties.platforms.map { it.watchType.codename })
+    return properties.platforms.firstOrNull { it.watchType == useWatchType }
 }

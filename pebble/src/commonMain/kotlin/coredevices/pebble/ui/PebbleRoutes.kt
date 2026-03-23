@@ -11,10 +11,8 @@ import androidx.navigation.NavBackStackEntry
 import androidx.navigation.NavGraphBuilder
 import androidx.navigation.compose.composable
 import androidx.navigation.toRoute
-import coredevices.database.AppstoreSource
 import io.rebble.libpebblecommon.locker.AppType
 import kotlinx.serialization.Serializable
-import kotlinx.serialization.json.Json
 import kotlin.uuid.Uuid
 
 /**
@@ -33,7 +31,6 @@ object PebbleRoutes {
     data class WatchappSettingsRoute(
         val watchIdentifier: String,
         val title: String,
-        val url: String
     ) : CoreRoute
 }
 
@@ -55,15 +52,7 @@ object PebbleNavBarRoutes {
     data object WatchesRoute : NavBarRoute
 
     @Serializable
-    data class WatchRoute(
-        val identifier: String,
-    ) : NavBarRoute
-
-    @Serializable
     data object WatchfacesRoute : NavBarRoute
-
-    @Serializable
-    data object WatchappsRoute : NavBarRoute
 
     @Serializable
     data class LockerAppRoute(
@@ -97,9 +86,6 @@ object PebbleNavBarRoutes {
     data object WeatherRoute : NavBarRoute
 
     @Serializable
-    data class AppStoreRoute(val appType: String?, val deepLinkId: String?) : NavBarRoute
-
-    @Serializable
     data class AppNotificationViewerRoute(val packageName: String, val channelId: String?) :
         NavBarRoute
 
@@ -110,7 +96,10 @@ object PebbleNavBarRoutes {
     data class AppStoreCollectionRoute(val sourceId: Int, val path: String, val title: String, val appType: String? = null) : NavBarRoute
 
     @Serializable
-    data class MyCollectionRoute(val appType: String, val myCollectionType: String) : NavBarRoute
+    data class MyCollectionRoute(val appType: String) : NavBarRoute
+
+    @Serializable
+    data object OfflineModelsRoute : NavBarRoute
 }
 
 inline fun <reified T : Any> NavGraphBuilder.composableWithAnimations(
@@ -157,29 +146,13 @@ fun NavGraphBuilder.addNavBarRoutes(
     indexScreen: @Composable (TopBarParams, NavBarNav) -> Unit,
     viewModel: WatchHomeViewModel,
 ) {
-    composableWithAnimations<PebbleNavBarRoutes.AppStoreRoute>(viewModel) {
-        val route: PebbleNavBarRoutes.AppStoreRoute = it.toRoute()
-        AppStoreScreen(nav, route.appType?.let { AppType.fromString(it) }, topBarParams, route.deepLinkId)
-    }
     composableWithAnimations<PebbleNavBarRoutes.WatchesRoute>(viewModel) {
         WatchesScreen(nav, topBarParams)
-    }
-    composableWithAnimations<PebbleNavBarRoutes.WatchRoute>(viewModel) {
-        val route: PebbleNavBarRoutes.WatchRoute = it.toRoute()
-        WatchScreen(nav, topBarParams, route.identifier)
-    }
-    composableWithAnimations<PebbleNavBarRoutes.WatchappsRoute>(viewModel) {
-        LockerScreen(
-            nav,
-            topBarParams,
-            LockerTab.Apps
-        )
     }
     composableWithAnimations<PebbleNavBarRoutes.WatchfacesRoute>(viewModel) {
         LockerScreen(
             nav,
             topBarParams,
-            LockerTab.Watchfaces
         )
     }
     composableWithAnimations<PebbleNavBarRoutes.LockerAppRoute>(viewModel) {
@@ -242,7 +215,6 @@ fun NavGraphBuilder.addNavBarRoutes(
             navBarNav = nav,
             topBarParams = topBarParams,
             appType = AppType.fromString(route.appType)!!,
-            type = MyCollectionType.fromCode(route.myCollectionType)!!,
         )
     }
     composable<PebbleNavBarRoutes.CalendarsRoute> {
@@ -253,6 +225,9 @@ fun NavGraphBuilder.addNavBarRoutes(
     }
     composable<PebbleNavBarRoutes.AppstoreSettingsRoute> {
         AppstoreSettingsScreen(nav, topBarParams)
+    }
+    composable<PebbleNavBarRoutes.OfflineModelsRoute> {
+        ModelManagementScreen(nav, topBarParams)
     }
 }
 
@@ -270,7 +245,6 @@ fun NavGraphBuilder.addPebbleRoutes(coreNav: CoreNav, indexScreen: @Composable (
             coreNav = coreNav,
             watchIdentifier = route.watchIdentifier,
             title = route.title,
-            url = route.url,
         )
     }
 }

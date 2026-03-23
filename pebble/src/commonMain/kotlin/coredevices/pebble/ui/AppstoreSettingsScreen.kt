@@ -36,9 +36,8 @@ import coredevices.database.AppstoreCollection
 import coredevices.database.AppstoreCollectionDao
 import coredevices.database.AppstoreSource
 import coredevices.database.AppstoreSourceDao
-import coredevices.pebble.account.BootConfigProvider
 import coredevices.pebble.account.PebbleAccount
-import coredevices.pebble.services.RealPebbleWebServices
+import coredevices.pebble.services.PebbleWebServices
 import coredevices.ui.M3Dialog
 import io.ktor.http.URLProtocol
 import io.ktor.http.parseUrl
@@ -56,7 +55,7 @@ import org.koin.core.parameter.parametersOf
 class AppstoreSettingsScreenViewModel(
     private val sourceDao: AppstoreSourceDao,
     private val collectionDao: AppstoreCollectionDao,
-    private val pebbleWebServices: RealPebbleWebServices,
+    private val pebbleWebServices: PebbleWebServices,
 ) : ViewModel() {
     val sources = sourceDao.getAllSources()
         .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
@@ -81,7 +80,6 @@ class AppstoreSettingsScreenViewModel(
     fun removeSource(sourceId: Int) {
         viewModelScope.launch {
             sourceDao.deleteSourceById(sourceId)
-            updateCollections()
         }
     }
 
@@ -90,7 +88,6 @@ class AppstoreSettingsScreenViewModel(
             collectionDao.insertOrUpdateCollection(
                 collection.copy(enabled = isEnabled)
             )
-            updateCollections()
         }
     }
 
@@ -101,7 +98,6 @@ class AppstoreSettingsScreenViewModel(
                 url = url
             )
             sourceDao.insertSource(source)
-            updateCollections()
         }
     }
 }
@@ -116,9 +112,8 @@ fun AppstoreSettingsScreen(nav: NavBarNav, topBarParams: TopBarParams) {
     val sourceDao: AppstoreSourceDao = koinInject()
     val scope = rememberCoroutineScope()
     val pebbleLoggedIn = pebbleAccount.loggedIn
-    val bootConfig = koinInject<BootConfigProvider>()
     LaunchedEffect(Unit) {
-        topBarParams.searchAvailable(false)
+        topBarParams.searchAvailable(null)
         topBarParams.actions {
             TopBarIconButtonWithToolTip(
                 onClick = {
@@ -129,30 +124,6 @@ fun AppstoreSettingsScreen(nav: NavBarNav, topBarParams: TopBarParams) {
             )
         }
         topBarParams.title("Appstore Sources")
-        topBarParams.canGoBack(true)
-        topBarParams.goBack.collect {
-            nav.goBack()
-        }
-    }
-    var showLockerImportDialog by remember { mutableStateOf<Int?>(null) }
-
-    if (showLockerImportDialog != null) {
-        val isRebble = remember {
-            parseUrl(bootConfig.getUrl() ?: "")?.host?.endsWith("rebble.io") == true
-        }
-        val sourceId = showLockerImportDialog
-        if (sourceId != null) {
-            LockerImportDialog(
-                onDismissRequest = { showLockerImportDialog = null },
-                isRebble = isRebble,
-                topBarParams = topBarParams,
-                onEnabled = {
-                    scope.launch {
-                        sourceDao.setSourceEnabled(sourceId, true)
-                    }
-                },
-            )
-        }
     }
 
     AppstoreSettingsScreen(
@@ -164,12 +135,8 @@ fun AppstoreSettingsScreen(nav: NavBarNav, topBarParams: TopBarParams) {
             scope.launch {
                 if (sources.firstOrNull {
                         parseUrl(it.url)?.host?.endsWith("rebble.io") ?: false
-                    }?.id == sourceId && isEnabled) {
-                    if (pebbleLoggedIn.value == null) {
+                    }?.id == sourceId && isEnabled && pebbleLoggedIn.value == null) {
                         uriHandler.openUri(REBBLE_LOGIN_URI)
-                    } else {
-                        showLockerImportDialog = sourceId
-                    }
                 } else {
                     sourceDao.setSourceEnabled(sourceId, isEnabled)
                 }
@@ -272,7 +239,8 @@ fun AppstoreSourceItem(
                                 AppType.Watchface -> "Watchface Collections"
                             },
                             modifier = Modifier.padding(start = 32.dp),
-                            style = MaterialTheme.typography.labelSmall
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.primary,
                         )
                         cols.forEach { col ->
                             ListItem(

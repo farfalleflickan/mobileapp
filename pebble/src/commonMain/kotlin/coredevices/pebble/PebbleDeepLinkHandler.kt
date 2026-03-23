@@ -5,7 +5,6 @@ import com.eygraber.uri.Uri
 import coredevices.analytics.CoreAnalytics
 import coredevices.database.AppstoreSourceDao
 import coredevices.pebble.account.PebbleAccount
-import coredevices.pebble.services.Github
 import coredevices.pebble.ui.NavBarRoute
 import coredevices.pebble.ui.PebbleNavBarRoutes
 import coredevices.util.CoreConfigFlow
@@ -28,35 +27,42 @@ expect fun readNameFromContentUri(appContext: AppContext, uri: Uri): String?
 
 expect fun writeFile(appContext: AppContext, uri: Uri): Path?
 
-class PebbleDeepLinkHandler(
+interface PebbleDeepLinkHandler {
+    val initialLockerSync: StateFlow<Boolean>
+    val snackBarMessages: SharedFlow<String>
+    val navigateToPebbleDeepLink: StateFlow<RealPebbleDeepLinkHandler.PebbleDeepLink?>
+    fun handle(uri: Uri?): Boolean
+}
+
+class RealPebbleDeepLinkHandler(
     private val pebbleAccount: PebbleAccount,
     private val libPebble: LibPebble,
-    private val github: Github,
     private val analytics: CoreAnalytics,
     private val context: AppContext,
     private val appstoreSourceDao: AppstoreSourceDao,
     private val coreConfigFlow: CoreConfigFlow,
-) {
+) : PebbleDeepLinkHandler {
     private val logger = Logger.withTag("PebbleDeepLinkHandler")
     private val _initialLockerSync = MutableStateFlow(false)
-    val initialLockerSync: StateFlow<Boolean> = _initialLockerSync.asStateFlow()
+    override val initialLockerSync: StateFlow<Boolean> = _initialLockerSync.asStateFlow()
     private val _snackBarMessages = MutableSharedFlow<String>(extraBufferCapacity = 5)
-    val snackBarMessages: SharedFlow<String> = _snackBarMessages.asSharedFlow()
+    override val snackBarMessages: SharedFlow<String> = _snackBarMessages.asSharedFlow()
     private val _navigateToPebbleDeepLink = MutableStateFlow<PebbleDeepLink?>(null)
-    val navigateToPebbleDeepLink = _navigateToPebbleDeepLink.asStateFlow()
+    override val navigateToPebbleDeepLink = _navigateToPebbleDeepLink.asStateFlow()
 
     data class PebbleDeepLink(
         val route: NavBarRoute,
         var consumed: Boolean = false,
     )
 
-    fun handle(uri: Uri?): Boolean {
+    override fun handle(uri: Uri?): Boolean {
         uri ?: return false
         return when {
             uri.scheme == "pebble" -> {
                 when (uri.host) {
                     CUSTOM_BOOT_CONFIG_URL -> handleBootConfig(uri.path)
                     STORE_URL -> handleAppstore("https://appstore-api.rebble.io/api", uri.path)
+                    NAVBAR_URL -> handleNavbar(uri.path)
                     else -> false
                 }
             }
@@ -181,29 +187,36 @@ class PebbleDeepLinkHandler(
         logger.v { "handleAppstore: $path" }
         GlobalScope.launch {
             val appId = path.removePrefix("/").removeSuffix("/")
-            if (coreConfigFlow.value.useNativeAppStore) {
-                val store = appstoreSourceDao.getAllEnabledSources().firstOrNull()?.find {
-                    it.url == storeUrl
-                }
-                if (store == null) {
-                    _snackBarMessages.tryEmit("Failed to find app in enabled feeds")
-                    return@launch
-                }
-                val route = PebbleNavBarRoutes.LockerAppRoute(
-                    uuid = null,
-                    storedId = appId,
-                    storeSource = store.id,
-                )
-                _navigateToPebbleDeepLink.value = PebbleDeepLink(route)
-            } else {
-                val route = PebbleNavBarRoutes.AppStoreRoute(
-                    appType = null,
-                    deepLinkId = appId,
-                )
-                _navigateToPebbleDeepLink.value = PebbleDeepLink(route)
+            val store = appstoreSourceDao.getAllEnabledSourcesFlow().firstOrNull()?.find {
+                it.url == storeUrl
             }
+            if (store == null) {
+                _snackBarMessages.tryEmit("Failed to find app in enabled feeds")
+                return@launch
+            }
+            val route = PebbleNavBarRoutes.LockerAppRoute(
+                uuid = null,
+                storedId = appId,
+                storeSource = store.id,
+            )
+            _navigateToPebbleDeepLink.value = PebbleDeepLink(route)
         }
         return true
+    }
+
+    private fun handleNavbar(path: String?): Boolean {
+        if (path == null) {
+            return false
+        }
+        logger.v { "handleNavbar: $path" }
+        return when (path.removePrefix("/").removeSuffix("/")) {
+            "index" -> {
+                _navigateToPebbleDeepLink.value = PebbleDeepLink(PebbleNavBarRoutes.IndexRoute)
+                true
+            }
+
+            else -> false
+        }
     }
 
     private fun handleGithubAuth(uri: Uri): Boolean {
@@ -214,15 +227,13 @@ class PebbleDeepLinkHandler(
             logger.w("handleGithubAuth: state is null")
             return false
         }
-        GlobalScope.launch {
-            github.handleRedirect(code, state, error)
-        }
         return true
     }
 
     companion object {
         private const val CUSTOM_BOOT_CONFIG_URL: String = "custom-boot-config-url"
         private const val STORE_URL: String = "appstore"
+        private const val NAVBAR_URL: String = "navbar"
         private const val GITHUB_OAUTH_CALLBACK_HOST: String = "cloud.repebble.com"
         private const val GITHUB_OAUTH_CALLBACK_PATH: String = "githubAuth"
         private val TOKEN_REGEX = Regex("access_token=(.*)&t=")

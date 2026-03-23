@@ -6,21 +6,34 @@ import com.oldguy.common.io.File
 import com.oldguy.common.io.FileMode
 import com.oldguy.common.io.ZipEntry
 import com.oldguy.common.io.ZipFile
+import com.russhwolf.settings.Settings
+import coredevices.CoreBackgroundSync
 import coredevices.ExperimentalDevices
 import coredevices.coreapp.api.BugApi
 import coredevices.coreapp.util.FileLogWriter
 import coredevices.coreapp.util.generateDeviceSummary
 import coredevices.coreapp.util.getLogsCacheDir
 import coredevices.pebble.PebbleAppDelegate
+import coredevices.pebble.ui.SettingsKeys.KEY_ENABLE_FIREBASE_UPLOADS
+import coredevices.pebble.ui.SettingsKeys.KEY_ENABLE_MEMFAULT_UPLOADS
+import coredevices.pebble.ui.SettingsKeys.KEY_ENABLE_MIXPANEL_UPLOADS
+import coredevices.util.CompanionDevice
+import coredevices.util.CoreConfigFlow
+import coredevices.util.PermissionRequester
+import coredevices.util.models.CactusSTTMode
+import coredevices.util.transcription.CactusTranscriptionService
 import dev.gitlive.firebase.Firebase
 import dev.gitlive.firebase.auth.auth
 import io.rebble.libpebblecommon.connection.AppContext
+import io.rebble.libpebblecommon.connection.KnownPebbleDevice
+import io.rebble.libpebblecommon.connection.LibPebble
 import io.rebble.libpebblecommon.util.getTempFilePath
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.GlobalScope
 import kotlinx.coroutines.IO
 import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.transformWhile
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -36,6 +49,7 @@ import kotlinx.io.writeString
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
+import org.koin.mp.KoinPlatform
 import size
 import kotlin.time.Clock
 
@@ -103,7 +117,13 @@ class BugReportProcessor(
     private val pebbleAppDelegate: PebbleAppDelegate,
     private val clock: Clock,
     private val appContext: AppContext,
-) {
+    private val coreBackgroundSync: CoreBackgroundSync,
+    private val settings: Settings,
+    private val libPebble: LibPebble,
+    private val coreConfigFlow: CoreConfigFlow,
+    private val permissionRequester: PermissionRequester,
+    private val companionDevice: CompanionDevice,
+    ) {
     private val logger = Logger.withTag("BugReportProcessor")
 
     private fun getPKJSSummary(): String {
@@ -112,6 +132,31 @@ class BugReportProcessor(
         } catch (e: Exception) {
             logger.e(e) { "Error grabbing PKJS sessions: ${e.message}" }
             "Error grabbing PKJS sessions\n"
+        }
+    }
+
+    private fun getSTTSummary(): String {
+        return try {
+            // Lazy grab in case of init issues
+            val transcriptionService = KoinPlatform.getKoin().get<CactusTranscriptionService>()
+            val lastModel = transcriptionService.lastModelUsed
+            val isModelReady = transcriptionService.isModelReady
+            val configuredModel = transcriptionService.configuredModel
+            val configuredMode = transcriptionService.configuredMode
+            val lastSuccessfulMode = when (transcriptionService.lastSuccessfulMode) {
+                CactusSTTMode.LocalOnly, CactusSTTMode.LocalFirst -> "Local"
+                CactusSTTMode.RemoteOnly, CactusSTTMode.RemoteFirst -> "Remote"
+                null -> "None"
+            }
+            "\nSTT Summary\n" +
+                    "Configured mode: $configuredMode\n" +
+                    "Configured model: $configuredModel\n" +
+                    "Is model ready: $isModelReady\n" +
+                    "Last model used: $lastModel\n" +
+                    "Last successful mode: $lastSuccessfulMode\n"
+        } catch (e: Exception) {
+            logger.e(e) { "Error grabbing STT sessions: ${e.message}" }
+            "Error grabbing STT sessions\n"
         }
     }
 
@@ -151,9 +196,13 @@ class BugReportProcessor(
         }
     }
 
-    private fun createSummaryAttachment(attachments: List<DocumentAttachment>): DocumentAttachment {
+    private suspend fun createSummaryAttachment(attachments: List<DocumentAttachment>): DocumentAttachment {
         val summaryWithAttachmentCount =
             createSummary("", attachments)
+        val logsDir = Path(getLogsCacheDir())
+        if (!SystemFileSystem.exists(logsDir)) {
+            SystemFileSystem.createDirectories(logsDir)
+        }
         val summaryFile = Path(getLogsCacheDir() + "/summary.txt")
         SystemFileSystem.sink(summaryFile, append = false).buffered().use { sink ->
             sink.writeString(summaryWithAttachmentCount)
@@ -168,7 +217,7 @@ class BugReportProcessor(
 
     fun updateBugReportWithNewLogs(bugReportId: String) {
         processBugReport(service = true) { state, userIdToken ->
-            state.value = BugReportState.GatheringWatchLogs
+            state.tryEmit(BugReportState.GatheringWatchLogs)
             val logsPath = logWriter.dumpLogs()
             val attachments = getPebbleLogFile() +
                     getPebbleCoreDump() +
@@ -185,11 +234,11 @@ class BugReportProcessor(
                 googleIdToken = userIdToken,
             )
             if (uploadResult.isSuccess) {
-                state.value = BugReportState.BugReportResult.Success(bugReportId)
+                state.tryEmit(BugReportState.BugReportResult.Success(bugReportId))
             } else {
-                state.value = BugReportState.BugReportResult.Failed(
+                state.tryEmit(BugReportState.BugReportResult.Failed(
                     uploadResult.exceptionOrNull()?.message ?: "Unknown error"
-                )
+                ))
             }
         }
     }
@@ -206,30 +255,40 @@ class BugReportProcessor(
                 googleIdToken = userIdToken,
             )
             if (uploadResult.isSuccess) {
-                state.value = BugReportState.BugReportResult.Success(bugReportId)
+                state.tryEmit(BugReportState.BugReportResult.Success(bugReportId))
             } else {
-                state.value = BugReportState.BugReportResult.Failed(
+                state.tryEmit(BugReportState.BugReportResult.Failed(
                     uploadResult.exceptionOrNull()?.message ?: "Unknown error"
-                )
+                ))
             }
         }
     }
 
-    private fun createSummary(
+    private suspend fun createSummary(
         screenContext: String,
         attachments: List<DocumentAttachment>
     ): String {
         val deviceSummary = generateDeviceSummary(experimentalDevices)
         val pkjsSummary = getPKJSSummary()
+        val sttSummary = getSTTSummary()
+        val pebbleContext = pebbleScreenContext()
         val summaryWithAttachmentCount = buildString {
             append(deviceSummary)
             append(pkjsSummary)
+            append(sttSummary)
+            if (pebbleContext.isNotEmpty()) {
+                append("\n${pebbleContext}")
+            }
             if (screenContext.isNotEmpty()) {
                 append("\n${screenContext}")
             }
             attachments.onEach {
                 append("\nAttachment: ${it.fileName}")
             }
+            append("\nTime since last full background sync: ${coreBackgroundSync.timeSinceLastSync()}")
+            append("\nFirebase uploads enabled: ${settings.getBoolean(KEY_ENABLE_FIREBASE_UPLOADS, true)}")
+            append("\nMemfault uploads enabled: ${settings.getBoolean(KEY_ENABLE_MEMFAULT_UPLOADS, true)}")
+            append("\nMixpanel uploads enabled: ${settings.getBoolean(KEY_ENABLE_MIXPANEL_UPLOADS, true)}")
         }
         return summaryWithAttachmentCount
     }
@@ -272,7 +331,7 @@ class BugReportProcessor(
                         e.message?.contains("timeout") == true -> "Request timed out. Please try again."
                         else -> "Unable to submit bug report. Please try again later."
                     }
-                    state.value = BugReportState.BugReportResult.Failed(userMessage)
+                    state.tryEmit(BugReportState.BugReportResult.Failed(userMessage))
                     return@processBugReport
                 }
 
@@ -288,8 +347,7 @@ class BugReportProcessor(
 
                 if (bugReportId == null) {
                     logger.e { "No bug report ID returned from server" }
-                    state.value =
-                        BugReportState.BugReportResult.Failed("Bug report created but no ID returned")
+                    state.tryEmit(BugReportState.BugReportResult.Failed("Bug report created but no ID returned"))
                     return@processBugReport
                 }
                 bugReportId
@@ -312,11 +370,11 @@ class BugReportProcessor(
                     googleIdToken = userIdToken,
                 )
                 if (uploadResult.isSuccess) {
-                    state.value = BugReportState.BugReportResult.Success(bugReportId)
+                    state.tryEmit(BugReportState.BugReportResult.Success(bugReportId))
                 } else {
-                    state.value = BugReportState.BugReportResult.Failed(
+                    state.tryEmit(BugReportState.BugReportResult.Failed(
                         uploadResult.exceptionOrNull()?.message ?: "Unknown error"
-                    )
+                    ))
                 }
             } else {
                 // Create a zip file containing all the attachments + parameters to reportBug
@@ -336,35 +394,39 @@ class BugReportProcessor(
                         zipFile.addEntry(ZipEntry(it.fileName), { it.source.readByteArray() })
                     }
                 }
-                state.value = BugReportState.ReadyToShare(
+                state.tryEmit(BugReportState.ReadyToShare(
                     name = filename,
                     file = bugReportFile,
-                )
+                ))
             }
         }
     }
 
-    private fun processBugReport(service: Boolean, block: suspend (state: MutableStateFlow<BugReportState>, userIdToken: String?) -> Unit): Flow<BugReportState> {
-        val state = MutableStateFlow<BugReportState>(BugReportState.Creating)
+    private fun processBugReport(service: Boolean, block: suspend (state: MutableSharedFlow<BugReportState>, userIdToken: String?) -> Unit): Flow<BugReportState> {
+        val state = MutableSharedFlow<BugReportState>(replay = 1, extraBufferCapacity = Int.MAX_VALUE)
+        state.tryEmit(BugReportState.Creating)
         if (service) {
             startForegroundService()
             notifyState("Creating bug report...")
             GlobalScope.launch {
-                state.transformWhile {
-                    emit(it)
-                    it !is BugReportState.BugReportResult
-                }.collect {
-                    when (it) {
-                        BugReportState.Creating -> Unit
-                        BugReportState.GatheringWatchLogs -> notifyState("Gathering watch logs...")
-                        BugReportState.UploadingAttachments -> notifyState("Uploading attachments")
-                        is BugReportState.BugReportResult.Failed -> notifyState("Bug report failed: ${it.error}")
-                        is BugReportState.BugReportResult.Success -> notifyState("Bug report successfully uploaded!")
-                        is BugReportState.ReadyToShare -> Unit
+                try {
+                    state.transformWhile {
+                        emit(it)
+                        it !is BugReportState.BugReportResult
+                    }.collect {
+                        when (it) {
+                            BugReportState.Creating -> Unit
+                            BugReportState.GatheringWatchLogs -> notifyState("Gathering watch logs...")
+                            BugReportState.UploadingAttachments -> notifyState("Uploading attachments")
+                            is BugReportState.BugReportResult.Failed -> notifyState("Bug report failed: ${it.error}")
+                            is BugReportState.BugReportResult.Success -> notifyState("Bug report successfully uploaded!")
+                            is BugReportState.ReadyToShare -> Unit
+                        }
                     }
+                } finally {
+                    logger.d { "Bug report processing complete; stopping service" }
+                    stopForegroundService()
                 }
-                logger.d { "Bug report processing complete; stopping service" }
-                stopForegroundService()
             }
         }
         GlobalScope.launch(Dispatchers.IO) {
@@ -374,7 +436,12 @@ class BugReportProcessor(
                 logger.e(e) { "No user token: ${e.message}" }
                 null
             }
-            block(state, userIdToken)
+            try {
+                block(state, userIdToken)
+            } catch (e: Exception) {
+                logger.e(e) { "Unhandled exception in bug report processing" }
+                state.tryEmit(BugReportState.BugReportResult.Failed("An unexpected error occurred"))
+            }
         }
         return state
     }
@@ -387,10 +454,10 @@ class BugReportProcessor(
 
     private suspend fun gatherAttachments(
         params: BugReportGenerationParams,
-        state: MutableStateFlow<BugReportState>
+        state: MutableSharedFlow<BugReportState>
     ): List<DocumentAttachment> {
         // Phase 2: Gather attachments (including watch logs/core dump)
-        state.value = BugReportState.GatheringWatchLogs
+        state.tryEmit(BugReportState.GatheringWatchLogs)
 
         // Add full logs as the first attachment (if available)
         val attachments = mutableListOf<DocumentAttachment>()
@@ -474,12 +541,12 @@ class BugReportProcessor(
     }
 
     suspend fun uploadAttachments(
-        state: MutableStateFlow<BugReportState>,
+        state: MutableSharedFlow<BugReportState>,
         bugReportId: String,
         attachments: List<DocumentAttachment>,
         googleIdToken: String?,
     ): Result<Unit> = withContext(Dispatchers.IO) {
-        state.value = BugReportState.UploadingAttachments
+        state.tryEmit(BugReportState.UploadingAttachments)
         try {
             logger.d { "Starting upload of ${attachments.size} attachments for bug report $bugReportId" }
 
@@ -572,6 +639,44 @@ class BugReportProcessor(
             Result.failure(Exception(userMessage))
         }
     }
+
+    suspend fun pebbleScreenContext(): String {
+        val watches = libPebble.watches.value.sortedByDescending {
+            when (it) {
+                is KnownPebbleDevice -> it.lastConnected.epochSeconds
+                else -> 0
+            }
+        }
+        val lastConnectedWatch = watches.firstOrNull() as? KnownPebbleDevice
+        val watchesWithoutCompanionDevicePermission = watches.mapNotNull {
+            if (it is KnownPebbleDevice && !companionDevice.hasApprovedDevice(it.identifier)) {
+                "[${it.identifier} / ${it.name}]"
+            } else {
+                null
+            }
+        }
+        return buildString {
+            appendLine("lastConnectedFirmwareVersion: ${lastConnectedWatch?.runningFwVersion}")
+            appendLine("lastConnectedSerial: ${lastConnectedWatch?.serial}")
+            appendLine("lastConnectedWatchType: ${lastConnectedWatch?.watchType}")
+            appendLine("activeWatchface: ${libPebble.activeWatchface.value?.let {
+                "${it.properties.id} / ${it.properties.title}"
+            }}")
+            appendLine("otherPebbleApps: ${libPebble.otherPebbleCompanionAppsInstalled().value}")
+            appendLine("libPebbleConfig: ${libPebble.config.value}")
+            appendLine("coreConfig: ${coreConfigFlow.value}")
+            appendLine("watch prefs: ${
+                libPebble.watchPrefs.first().joinToString(", ") { "${it.pref.id}=${it.value}" }
+            }")
+            appendLine("missingPermissions: ${permissionRequester.missingPermissions.value}")
+            appendLine("watchesWithoutCompanionDevicePermission: $watchesWithoutCompanionDevicePermission")
+            appendLine(libPebble.watchesDebugState())
+            appendLine("Watches (most recently connected first):")
+            watches.forEachIndexed { index, watch ->
+                appendLine("watch_$index $watch")
+            }
+        }
+    }
 }
 
 fun Path?.readMostRecent(bytes: Int): String? {
@@ -588,3 +693,4 @@ fun Path?.readMostRecent(bytes: Int): String? {
         null
     }
 }
+

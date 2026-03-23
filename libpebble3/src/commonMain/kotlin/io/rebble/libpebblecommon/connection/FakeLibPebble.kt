@@ -155,6 +155,10 @@ class FakeLibPebble : LibPebble {
         return flow { emit(emptyList()) }
     }
 
+    override fun getAllLockerUuids(): Flow<List<Uuid>> {
+        return flow { emit(emptyList()) }
+    }
+
     val locker = MutableStateFlow(fakeLockerEntries)
 
     override fun getLocker(
@@ -183,8 +187,14 @@ class FakeLibPebble : LibPebble {
     override suspend fun addAppToLocker(app: LockerEntry) {
     }
 
+    override suspend fun addAppsToLocker(apps: List<LockerEntry>) {
+    }
+
     override fun restoreSystemAppOrder() {
     }
+
+    override val activeWatchface: StateFlow<LockerWrapper?>
+        get() = MutableStateFlow(fakeLockerEntry())
 
     private val _notificationApps = MutableStateFlow(fakeNotificationApps)
 
@@ -201,6 +211,20 @@ class FakeLibPebble : LibPebble {
         limit: Int
     ): Flow<List<NotificationEntity>> = flow {
         emit(fakeNotifications)
+    }
+
+    override fun mostRecentNotificationParticipants(limit: Int): Flow<List<String>> {
+        return flow {
+            emit(
+                listOf(
+                    "Alice",
+                    "Bob Smith",
+                    "Charlie Johnson",
+                    "David Williams",
+                    "Eve Jones",
+                )
+            )
+        }
     }
 
     private val fakeNotifications by lazy { fakeNotifications() }
@@ -445,7 +469,7 @@ fun fakeWatch(connected: Boolean = Random.nextBoolean()): PebbleDevice {
         }
         FakeConnectedDevice(
             identifier = fakeIdentifier,
-            firmwareUpdateAvailable = fwupAvailable,
+            firmwareUpdateAvailable = FirmwareUpdateCheckState(false, fwupAvailable),
             firmwareUpdateState = fwupState,
             name = name,
             nickname = null,
@@ -466,7 +490,7 @@ fun fakeWatch(connected: Boolean = Random.nextBoolean()): PebbleDevice {
 
 class FakeConnectedDevice(
     override val identifier: PebbleIdentifier,
-    override val firmwareUpdateAvailable: FirmwareUpdateCheckResult?,
+    override val firmwareUpdateAvailable: FirmwareUpdateCheckState,
     override val firmwareUpdateState: FirmwareUpdater.FirmwareUpdateStatus,
     override val name: String,
     override val nickname: String?,
@@ -590,7 +614,7 @@ class FakeConnectedDevice(
 
     @Deprecated("Use more generic currentCompanionAppSession instead and cast if necessary")
     override val currentPKJSSession: StateFlow<PKJSApp?> = MutableStateFlow(null)
-    override val currentCompanionAppSession: StateFlow<CompanionApp?> = MutableStateFlow(null)
+    override val currentCompanionAppSessions: StateFlow<List<CompanionApp>> = MutableStateFlow(emptyList())
 
     override suspend fun startDevConnection() {}
     override suspend fun stopDevConnection() {}
@@ -619,7 +643,7 @@ class FakeConnectedDevice(
 
 class FakeConnectedDeviceInRecovery(
     override val identifier: PebbleIdentifier,
-    override val firmwareUpdateAvailable: FirmwareUpdateCheckResult?,
+    override val firmwareUpdateAvailable: FirmwareUpdateCheckState,
     override val firmwareUpdateState: FirmwareUpdater.FirmwareUpdateStatus,
     override val name: String,
     override val nickname: String?,
@@ -825,6 +849,7 @@ fun fakeLockerEntry(): LockerWrapper {
             developerId = "123",
             sourceLink = "https://example.com",
             storeId = "6962e51d29173c0009b18f8e",
+            capabilities = emptyList(),
         ),
         sideloaded = false,
         configurable = Random.nextBoolean(),

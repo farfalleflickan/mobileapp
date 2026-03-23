@@ -10,14 +10,18 @@ import com.algolia.client.model.search.TagFilters
 import coredevices.database.AppstoreCollection
 import coredevices.database.AppstoreCollectionDao
 import coredevices.database.AppstoreSource
+import coredevices.database.HeartEntity
+import coredevices.database.HeartsDao
 import coredevices.pebble.Platform
 import coredevices.pebble.account.FirestoreLockerEntry
 import coredevices.pebble.services.AppstoreService.BulkFetchParams.Companion.encodeToJson
+import coredevices.pebble.services.PebbleHttpClient.Companion.delete
+import coredevices.pebble.services.PebbleHttpClient.Companion.post
 import coredevices.pebble.ui.CommonApp
-import coredevices.pebble.ui.DEFAULT_CATEGORIES_APPS
-import coredevices.pebble.ui.DEFAULT_CATEGORIES_FACES
 import coredevices.pebble.ui.asCommonApp
 import coredevices.pebble.ui.cachedCategoriesOrDefaults
+import dev.gitlive.firebase.Firebase
+import dev.gitlive.firebase.auth.auth
 import io.ktor.client.HttpClient
 import io.ktor.client.call.body
 import io.ktor.client.plugins.HttpTimeout
@@ -27,6 +31,7 @@ import io.ktor.client.request.header
 import io.ktor.client.request.parameter
 import io.ktor.client.request.post
 import io.ktor.client.request.setBody
+import io.ktor.http.HttpStatusCode
 import io.ktor.http.Url
 import io.ktor.http.isSuccess
 import io.ktor.http.parseUrl
@@ -42,6 +47,7 @@ import kotlinx.io.IOException
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
+import kotlin.coroutines.cancellation.CancellationException
 import kotlin.uuid.Uuid
 
 class AppstoreService(
@@ -50,6 +56,10 @@ class AppstoreService(
     val source: AppstoreSource,
     private val cache: AppstoreCache,
     private val appstoreCollectionDao: AppstoreCollectionDao,
+    private val pebbleAccountProvider: PebbleAccountProvider,
+    private val pebbleWebServices: PebbleWebServices,
+    private val pebbleHttpClient: PebbleHttpClient,
+    private val heartsDao: HeartsDao,
 ) {
     private val scope = CoroutineScope(Dispatchers.Default)
 
@@ -73,16 +83,28 @@ class AppstoreService(
         coerceInputValues = true
     }
 
-    private fun supportsBulkFetch(): Boolean = source.url.startsWith("https://appstore-api.repebble.com/")
+    private fun supportsBulkFetch(): Boolean = !source.isRebbleFeed()
 
     suspend fun fetchAppStoreApps(
         entries: List<FirestoreLockerEntry>,
         useCache: Boolean = true,
     ): List<LockerEntry> {
-        return if (!supportsBulkFetch()) {
+        return if (pebbleAccountProvider.isLoggedIn() && source.isRebbleFeed()) {
+            fetchAppStoreAppsFromPwsLocker()
+        } else if (!supportsBulkFetch()) {
             fetchAppStoreAppsOneByOne(entries, useCache)
         } else {
             fetchAppStoreAppsInBulk(entries)
+        }
+    }
+
+    private suspend fun fetchAppStoreAppsFromPwsLocker(): List<LockerEntry> {
+        val locker = pebbleWebServices.fetchPebbleLocker()
+        if (locker == null) {
+            logger.w { "Failed to fetch Pebble locker" }
+            return emptyList()
+        } else {
+            return locker.applications
         }
     }
 
@@ -99,28 +121,28 @@ class AppstoreService(
     private suspend fun fetchAppStoreAppsInBulk(
         entries: List<FirestoreLockerEntry>,
     ): List<LockerEntry> {
+        val entriesByAppstoreId = entries.associateBy { it.appstoreId }
         return entries.chunked(500).also {
             logger.d { "Bulk fetching locker entries in ${it.size} chunks" }
         }.flatMap { lockerEntries ->
-            val result = lockerEntries.flatMap { lockerEntry ->
-                try {
-                    httpClient.post(url = Url("${source.url}/v1/apps/bulk")) {
-                        header("Content-Type", "application/json")
-                        setBody(BulkFetchParams(entries.map { it.appstoreId }).encodeToJson())
-                    }.takeIf { it.status.isSuccess() }?.body<BulkStoreResponse>()
-                        ?.data?.map {
-                            it.toLockerEntry(
-                                sourceUrl = lockerEntry.appstoreSource,
-                                timelineToken = lockerEntry.timelineToken,
-                            )
-                        } ?: emptyList()
-                } catch (e: IOException) {
-                    logger.w(e) { "Error loading app store app" }
-                    emptyList()
-                }
+            try {
+                logger.v { "Fetching chunk size = ${lockerEntries.size}" }
+                httpClient.post(url = Url("${source.url}/v1/apps/bulk")) {
+                    header("Content-Type", "application/json")
+                    setBody(BulkFetchParams(lockerEntries.map { it.appstoreId }).encodeToJson())
+                }.takeIf { it.status.isSuccess() }?.body<BulkStoreResponse>()
+                    ?.data?.mapNotNull { app ->
+                        val matchingEntry = entriesByAppstoreId[app.id]
+                        app.toLockerEntry(
+                            sourceUrl = matchingEntry?.appstoreSource ?: source.url,
+                            timelineToken = matchingEntry?.timelineToken,
+                        )
+                    } ?: emptyList()
+            } catch (e: IOException) {
+                logger.w(e) { "Error loading app store app" }
+                emptyList()
             }
-            result
-        }.filterNotNull()
+        }
     }
 
     private suspend fun fetchAppStoreAppsOneByOne(
@@ -147,6 +169,62 @@ class AppstoreService(
             }
             result
         }.filterNotNull()
+    }
+
+    suspend fun addHeart(url: String, appId: String): Boolean {
+        val success = when (source.url) {
+            PEBBLE_FEED_URL -> {
+                pebbleHttpClient.post(url = url, auth = HttpClientAuthType.Core)?.status?.isSuccessOr(409) ?: false
+            }
+            REBBLE_FEED_URL -> {
+                pebbleHttpClient.post(url = url, auth = HttpClientAuthType.Pebble)?.status?.isSuccessOr(400) ?: false
+            }
+            else -> false
+        }
+        if (success) {
+            heartsDao.addHeart(HeartEntity(sourceId = source.id, appId = appId))
+        }
+        return success
+    }
+
+    suspend fun removeHeart(url: String, appId: String): Boolean {
+        val success = when (source.url) {
+            PEBBLE_FEED_URL -> {
+                pebbleHttpClient.delete(url = url, auth = HttpClientAuthType.Core)
+            }
+            REBBLE_FEED_URL -> {
+                pebbleHttpClient.post(url = url, auth = HttpClientAuthType.Pebble)?.status?.isSuccess() ?: false
+            }
+            else -> false
+        }
+        if (success) {
+            heartsDao.removeHeart(HeartEntity(sourceId = source.id, appId = appId))
+        }
+        return success
+    }
+
+    fun isLoggedIn(): Boolean {
+        return when (source.url) {
+            PEBBLE_FEED_URL -> {
+                Firebase.auth.currentUser != null
+            }
+            REBBLE_FEED_URL -> {
+                pebbleAccountProvider.isLoggedIn()
+            }
+            else -> false
+        }
+    }
+
+    suspend fun fetchHearts(): List<String>? {
+        return when (source.url) {
+            PEBBLE_FEED_URL -> {
+                pebbleWebServices.fetchUsersMeCore()?.votedIds
+            }
+            REBBLE_FEED_URL -> {
+                pebbleWebServices.fetchUsersMePebble()?.users?.firstOrNull()?.votedIds
+            }
+            else -> null
+        }
     }
 
     suspend fun fetchAppStoreApp(
@@ -208,19 +286,21 @@ class AppstoreService(
                     parameter(it.key, it.value)
                 }
             }
-        } catch (e: IOException) {
+                .takeIf {
+                    logger.v { "${it.call.request.url}" }
+                    if (!it.status.isSuccess()) {
+                        logger.w { "Failed to fetch home of type ${type.code}, status: ${it.status}, source = ${source.url}" }
+                        false
+                    } else {
+                        true
+                    }
+                }?.body<AppStoreHome>()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
             logger.w(e) { "Error loading app store home" }
             return null
         }
-            .takeIf {
-                logger.v { "${it.call.request.url}" }
-                if (!it.status.isSuccess()) {
-                    logger.w { "Failed to fetch home of type ${type.code}, status: ${it.status}, source = ${source.url}" }
-                    false
-                } else {
-                    true
-                }
-            }?.body<AppStoreHome>()
         home?.let {
             cache.writeCategories(home.categories, type, source)
             appstoreCollectionDao.updateListOfCollections(type, home.collections.map {
@@ -229,12 +309,13 @@ class AppstoreService(
                     title = it.name,
                     slug = it.slug,
                     type = type,
-                    enabled = true,
+                    enabled = enableByDefault(source, type, it.slug),
                 )
             }, sourceId = source.id)
             cache.writeHome(home, type, source, parameters)
         }
         return home?.copy(applications = home.applications.filter { app ->
+            if (app.uuid == null) return@filter false
             try {
                 if (Uuid.parse(app.uuid) == Uuid.NIL) {
                     logger.w { "App ${app.title} has NIL UUID, skipping" }
@@ -294,16 +375,16 @@ class AppstoreService(
                     if (response != null) {
                         val apps = response.data.mapNotNull {
                             it.asCommonApp(
-                                hardwarePlatform,
-                                platform,
-                                source,
-                                categories.await(),
+                                watchType = hardwarePlatform,
+                                platform = platform,
+                                source = source,
+                                categories = categories.await(),
                             )
                         }
                         LoadResult.Page(
                             data = apps,
                             prevKey = if (offset > 0) (offset - params.loadSize).coerceAtLeast(0) else null,
-                            nextKey = if (response.data.size == params.loadSize) offset + params.loadSize else null,
+                            nextKey = if (response.links.nextPage != null) offset + params.loadSize else null,
                         )
                     } else {
                         LoadResult.Error(IllegalStateException("Null response"))
@@ -357,7 +438,7 @@ class AppstoreService(
         }
     }
 
-    suspend fun search(search: String, type: AppType? = null): List<StoreSearchResult> {
+    suspend fun search(search: String, appType: AppType, watchType: WatchType, page: Int = 0, pageSize: Int = 20): List<StoreSearchResult> {
         if (searchClient == null) {
             logger.w { "searchClient is null, cannot search" }
             return emptyList()
@@ -369,7 +450,17 @@ class AppstoreService(
 //                searchParams = SearchParams.of(SearchParamsString(search)),
                 searchParams = SearchParamsObject(
                     query = search,
-                    tagFilters = type?.let { TagFilters.of(type.code) },
+                    tagFilters = TagFilters.of(
+                        listOf(
+                            TagFilters.of(appType.code),
+                            TagFilters.of(platform.storeString()),
+                            // Don't filter on platform - rebble index doesn't have emery for all
+                            // compatible apps (plus we have the incompatible filter..)
+//                            TagFilters.of(watchType.codename),
+                        )
+                    ),
+                    page = page,
+                    hitsPerPage = pageSize,
                 ),
             ).hits.mapNotNull {
                 it.additionalProperties?.let { props ->
@@ -392,3 +483,14 @@ class AppstoreService(
         }
     }
 }
+
+fun enableByDefault(source: AppstoreSource, type: AppType, slug: String): Boolean {
+    val isFirstSource = INITIAL_APPSTORE_SOURCES.first().url == source.url
+    return when (slug) {
+        "all-generated" -> false
+        "all" -> true
+        else -> isFirstSource
+    }
+}
+
+fun HttpStatusCode.isSuccessOr(code: Int) = isSuccess() || value == code

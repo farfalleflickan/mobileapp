@@ -5,7 +5,7 @@ import co.touchlab.kermit.Logger
 import com.russhwolf.settings.Settings
 import coredevices.database.WeatherLocationDao
 import coredevices.database.WeatherLocationEntity
-import coredevices.pebble.services.RealPebbleWebServices
+import coredevices.pebble.services.PebbleWebServices
 import coredevices.util.CoreConfigFlow
 import coredevices.util.WeatherUnit
 import dev.jordond.compass.Place
@@ -20,13 +20,12 @@ import io.rebble.libpebblecommon.util.GeolocationPositionResult
 import io.rebble.libpebblecommon.util.SystemGeolocation
 import io.rebble.libpebblecommon.weather.WeatherLocationData
 import io.rebble.libpebblecommon.weather.WeatherType
-import kotlinx.serialization.KSerializer
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.GlobalScope
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
-import kotlinx.serialization.descriptors.PrimitiveKind
-import kotlinx.serialization.descriptors.PrimitiveSerialDescriptor
-import kotlinx.serialization.encoding.Decoder
-import kotlinx.serialization.encoding.Encoder
 import kotlin.time.Clock
 import kotlin.time.Duration
 import kotlin.time.Instant
@@ -42,7 +41,7 @@ private val logger = Logger.withTag("WeatherFetcher")
 class WeatherFetcher(
     private val systemGeolocation: SystemGeolocation,
     private val coreConfigFlow: CoreConfigFlow,
-    private val pebbleWebServices: RealPebbleWebServices,
+    private val pebbleWebServices: PebbleWebServices,
     private val libPebble: LibPebble,
     private val clock: Clock,
     private val settings: Settings,
@@ -59,10 +58,10 @@ class WeatherFetcher(
             return
         }
         settings.putBoolean(SETTINGS_KEY_HAS_DONE_ONE_SYNC, true)
-        fetchWeather()
+        fetchWeather(GlobalScope)
     }
 
-    suspend fun fetchWeather() {
+    suspend fun fetchWeather(scope: CoroutineScope) {
         val weatherEnabled = coreConfigFlow.value.fetchWeather
         val pinsEnabled = coreConfigFlow.value.weatherPinsV2
         val units = coreConfigFlow.value.weatherUnits
@@ -79,15 +78,17 @@ class WeatherFetcher(
         val locations = getLocationsAndUpdateCurrentLocation()
         val locale = Locale.current.toLanguageTag()
         val fetchedData = locations.map { location ->
-            val lat = location.latitude
-            val lon = location.longitude
-            val response = if (lat == null || lon == null) {
-                null
-            } else {
-                pebbleWebServices.getWeather(lat, lon, units, locale)
+            scope.async {
+                val lat = location.latitude
+                val lon = location.longitude
+                val response = if (lat == null || lon == null) {
+                    null
+                } else {
+                    pebbleWebServices.getWeather(lat, lon, units, locale)
+                }
+                LocationWithData(location, response)
             }
-            LocationWithData(location, response)
-        }
+        }.awaitAll()
         val weatherAppData = fetchedData.map { location ->
             weatherAppData(location, units)
                 ?: WeatherLocationData.WeatherLocationDataFailed(location.location.key)
@@ -151,7 +152,7 @@ class WeatherFetcher(
             logger.w { "Couldn't find temps for units: $units" }
             return null
         }
-        val tomorrow = weather.fcstdaily7.data.forecasts.getOrNull(0)
+        val tomorrow = weather.fcstdaily7.data.forecasts.getOrNull(1)
         if (tomorrow == null || tomorrow.day == null) {
             logger.w { "Couldn't find forcast for tomorrow" }
             return null
@@ -187,7 +188,7 @@ class WeatherFetcher(
                 if (dayForecast == null) {
                     null
                 } else {
-                    "${it.location.name}\n${dayForecast.temp}/${it.forecast.night}, ${dayForecast.phrase12Char}"
+                    "${it.location.name}\n${dayForecast.temp}/${it.forecast.night.temp}, ${dayForecast.phrase12Char}"
                 }
             }.ifEmpty { null }?.joinToString("\n—\n")
             createTimelinePin(
@@ -292,24 +293,24 @@ private val DayAfterTomorrowDayUuid = Uuid.parse("3233984e-2dc9-4469-8a9a-46f91d
 private val DayAfterTomorrowNightUuid = Uuid.parse("fd97c081-9970-436b-aa87-9c55232bce35")
 private const val TEMP_NO_VALUE = Short.MAX_VALUE
 
-object Iso8601InstantSerializer : KSerializer<Instant> {
-    override val descriptor = PrimitiveSerialDescriptor("Instant", PrimitiveKind.STRING)
-
-    override fun serialize(encoder: Encoder, value: Instant) {
-        encoder.encodeString(value.toString())
-    }
-
-    override fun deserialize(decoder: Decoder): Instant {
-        val string = decoder.decodeString()
-        // The API returns a non-standard ISO-8601 date string.
-        // The timezone offset is missing a colon.
-        // Examples: 2025-12-01T13:37:16+0000 and 2025-12-01T14:17:58-0800
-        // We need to insert the colon to make it parseable by Instant.
-        // i.e. 2025-12-01T13:37:16+00:00
-        val sanitized = string.substring(0, string.length - 2) + ":" + string.substring(string.length - 2)
-        return Instant.parse(sanitized)
-    }
-}
+//object Iso8601InstantSerializer : KSerializer<Instant> {
+//    override val descriptor = PrimitiveSerialDescriptor("Instant", PrimitiveKind.STRING)
+//
+//    override fun serialize(encoder: Encoder, value: Instant) {
+//        encoder.encodeString(value.toString())
+//    }
+//
+//    override fun deserialize(decoder: Decoder): Instant {
+//        val string = decoder.decodeString()
+//        // The API returns a non-standard ISO-8601 date string.
+//        // The timezone offset is missing a colon.
+//        // Examples: 2025-12-01T13:37:16+0000 and 2025-12-01T14:17:58-0800
+//        // We need to insert the colon to make it parseable by Instant.
+//        // i.e. 2025-12-01T13:37:16+00:00
+//        val sanitized = string.substring(0, string.length - 2) + ":" + string.substring(string.length - 2)
+//        return Instant.parse(sanitized)
+//    }
+//}
 
 fun Int.toWeatherType(): WeatherType = when (this) {
     in 0..4 -> WeatherType.HeavyRain
@@ -377,10 +378,15 @@ data class ConditionsObservation(
     val imperial: ConditionTemps? = null,
     @SerialName("uk_hybrid")
     val ukHybrid: ConditionTemps? = null,
+    @SerialName("phrase_12char")
+    val phrase12Char: String,
+    @SerialName("phrase_22char")
+    val phrase22Char: String,
     @SerialName("phrase_32char")
     val phrase32Char: String,
     @SerialName("icon_code")
     val iconCode: Int,
+    val obs_time: Long,
 )
 
 fun ConditionsObservation.tempsFor(units: WeatherUnit): ConditionTemps? = when (units) {
@@ -407,17 +413,33 @@ data class DailyForecastData(
 
 @Serializable
 data class DailyForecast(
-    @Serializable(with = Iso8601InstantSerializer::class)
-    val sunrise: Instant,
-    @Serializable(with = Iso8601InstantSerializer::class)
-    val sunset: Instant,
+//    @Serializable(with = Iso8601InstantSerializer::class)
+//    val sunrise: Instant,
+    @SerialName("sunrise")
+    val sunriseRaw: String,
+//    @Serializable(with = Iso8601InstantSerializer::class)
+//    val sunset: Instant,
+    @SerialName("sunset")
+    val sunsetRaw: String,
     val day: DailyDayNight? = null,
     val night: DailyDayNight,
     @SerialName("max_temp")
     val maxTemp: Int?,
     @SerialName("min_temp")
     val minTemp: Int,
+    val dow: String,
 )
+
+private fun String.asInstantFromIso8601(): Instant {
+    val sanitized = substring(0, length - 2) + ":" + substring(length - 2)
+    return Instant.parse(sanitized)
+}
+
+
+val DailyForecast.sunrise: Instant
+    get() = sunriseRaw.asInstantFromIso8601()
+val DailyForecast.sunset: Instant
+    get() = sunsetRaw.asInstantFromIso8601()
 
 @Serializable
 data class DailyDayNight(
@@ -427,4 +449,8 @@ data class DailyDayNight(
     val iconCode: Int,
     @SerialName("phrase_12char")
     val phrase12Char: String,
+    @SerialName("phrase_22char")
+    val phrase22Char: String,
+    @SerialName("phrase_32char")
+    val phrase32Char: String,
 )
