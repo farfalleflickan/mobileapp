@@ -13,6 +13,7 @@ import coredevices.pebble.account.PebbleAccount
 import coredevices.pebble.account.UsersMeResponse
 import coredevices.pebble.account.compareVersionStrings
 import coredevices.pebble.firmware.FirmwareUpdateCheck
+import coredevices.pebble.services.Memfault.Companion.serialForMemfault
 import coredevices.pebble.services.PebbleHttpClient.Companion.delete
 import coredevices.pebble.services.PebbleHttpClient.Companion.get
 import coredevices.pebble.services.PebbleHttpClient.Companion.put
@@ -255,7 +256,7 @@ class RealPebbleWebServices(
     private val httpClient: PebbleHttpClient,
     private val firmwareUpdateCheck: FirmwareUpdateCheck,
     private val bootConfig: BootConfigProvider,
-    private val memfault: Memfault,
+    private val memfaultChunkQueue: MemfaultChunkQueue,
     private val appstoreSourceDao: AppstoreSourceDao,
     private val firestoreLocker: FirestoreLocker,
     private val coreConfig: CoreConfigFlow,
@@ -349,8 +350,8 @@ class RealPebbleWebServices(
     override suspend fun checkForFirmwareUpdate(watch: WatchInfo): FirmwareUpdateCheckResult =
         firmwareUpdateCheck.checkForUpdates(watch)
 
-    override suspend fun uploadMemfaultChunk(chunk: ByteArray, watchInfo: WatchInfo) {
-        memfault.uploadChunk(chunk, watchInfo)
+    override fun uploadMemfaultChunk(chunk: ByteArray, watchInfo: WatchInfo) {
+        memfaultChunkQueue.enqueue(watchInfo.serialForMemfault(), chunk)
     }
 
     override suspend fun addToLegacyLocker(uuid: String): Boolean =
@@ -780,6 +781,16 @@ data class StoreLinks(
  */
 
 @Serializable
+enum class SettingsPageState() {
+    @SerialName("no_page")
+    NoPage,
+    @SerialName("page_loads")
+    PageLoads,
+    @SerialName("page_doesnt_load")
+    PageDoesntLoad,
+}
+
+@Serializable
 data class StoreLatestRelease(
     val id: String,
     @SerialName("js_md5")
@@ -793,6 +804,8 @@ data class StoreLatestRelease(
     val publishedDate: Instant?,
     @SerialName("release_notes")
     val releaseNotes: String?,
+    @SerialName("settings_page_state")
+    val settingsPageState: SettingsPageState? = null,
     val version: String?,
 )
 

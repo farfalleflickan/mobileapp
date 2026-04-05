@@ -15,6 +15,7 @@ import io.rebble.libpebblecommon.services.appmessage.AppMessageResult
 import io.rebble.pebblekit2.common.model.PebbleDictionary
 import io.rebble.pebblekit2.common.model.PebbleDictionaryItem
 import io.rebble.pebblekit2.common.model.ReceiveResult
+import io.rebble.pebblekit2.common.model.TransmissionResult
 import io.rebble.pebblekit2.common.model.WatchIdentifier
 import io.rebble.pebblekit2.server.DefaultPebbleListenerConnector
 import kotlinx.atomicfu.atomic
@@ -23,13 +24,16 @@ import kotlinx.coroutines.CoroutineName
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.plus
-import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.coroutines.cancellation.CancellationException
 import kotlin.time.Duration.Companion.seconds
@@ -52,7 +56,7 @@ class PebbleKit2(
     private var runningScope: CoroutineScope? = null
     private var incomingConsumer: Job? = null
 
-    override suspend fun start() {
+    override suspend fun start(incomingAppMessages: Flow<AppMessageData>) {
         val exceptionHandler = CoroutineExceptionHandler { _, throwable ->
             logger.e(throwable) { "Unhandled exception in PebbleKit2 $uuid: ${throwable.message}" }
         }
@@ -66,7 +70,7 @@ class PebbleKit2(
             )
 
             if (connectSuccess) {
-                launchIncomingAppMessageHandler(scope)
+                launchIncomingAppMessageHandler(scope, incomingAppMessages)
             } else {
                 val appName = appInfo.shortName
                 val downloadUrl = appInfo.companionApp?.android?.url
@@ -80,7 +84,7 @@ class PebbleKit2(
                 )
                 if (!pkjsRunning) {
                     // Don't auto-NACK if PKJS is running
-                    launchNackAllIncomingMessages(scope)
+                    launchNackAllIncomingMessages(scope, incomingAppMessages)
                 }
             }
         }
@@ -108,13 +112,30 @@ class PebbleKit2(
         return targetPackages.contains(pkg)
     }
 
-    suspend fun sendMessage(pebbleDictionary: PebbleDictionary): AppMessageResult {
+    suspend fun sendMessage(pebbleDictionary: PebbleDictionary): TransmissionResult {
         val transactionId = (nextTransactionId.getAndIncrement() % UByte.MAX_VALUE.toInt()).toUByte()
-        return device.sendAppMessage(AppMessageData(transactionId, uuid, pebbleDictionary.toAppMessageDict()))
+
+        return try {
+            val runningScope = runningScope ?: return TransmissionResult.FailedDifferentAppOpen
+            // Send through async to ensure that cancelling of the running scope (presumably because app got closed)
+            // immediately cancels the sending
+            val res = runningScope.async {
+                device.sendAppMessage(AppMessageData(transactionId, uuid, pebbleDictionary.toAppMessageDict()))
+            }.await()
+
+            when (res) {
+                is AppMessageResult.ACK -> TransmissionResult.Success
+                is AppMessageResult.NACK -> TransmissionResult.FailedWatchNacked
+            }
+        } catch (e: CancellationException) {
+            currentCoroutineContext().ensureActive()
+
+            TransmissionResult.FailedDifferentAppOpen
+        }
     }
 
-    private fun launchIncomingAppMessageHandler(scope: CoroutineScope) {
-        incomingConsumer = device.inboundAppMessages(uuid).onEach { appMessageData ->
+    private fun launchIncomingAppMessageHandler(scope: CoroutineScope, messages: Flow<AppMessageData>) {
+        incomingConsumer = messages.onEach { appMessageData ->
             try {
                 logger.d { "Got inbound AppMessage" }
 
@@ -138,8 +159,8 @@ class PebbleKit2(
         }.launchIn(scope)
     }
 
-    private fun launchNackAllIncomingMessages(scope: CoroutineScope) {
-        incomingConsumer = device.inboundAppMessages(uuid).onEach { appMessageData ->
+    private fun launchNackAllIncomingMessages(scope: CoroutineScope, messages: Flow<AppMessageData>) {
+        incomingConsumer = messages.onEach { appMessageData ->
             try {
                 logger.d { "Got inbound AppMessage, but valid companion app is not running. Nacking..." }
 

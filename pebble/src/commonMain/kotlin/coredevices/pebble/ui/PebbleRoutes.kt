@@ -86,6 +86,9 @@ object PebbleNavBarRoutes {
     data object WeatherRoute : NavBarRoute
 
     @Serializable
+    data object CannedRepliesRoute : NavBarRoute
+
+    @Serializable
     data class AppNotificationViewerRoute(val packageName: String, val channelId: String?) :
         NavBarRoute
 
@@ -100,6 +103,9 @@ object PebbleNavBarRoutes {
 
     @Serializable
     data object OfflineModelsRoute : NavBarRoute
+
+    @Serializable
+    data class WatchSettingsCategoryRoute(val section: String, val topLevelType: String) : NavBarRoute
 }
 
 inline fun <reified T : Any> NavGraphBuilder.composableWithAnimations(
@@ -223,11 +229,23 @@ fun NavGraphBuilder.addNavBarRoutes(
     composable<PebbleNavBarRoutes.WeatherRoute> {
         WeatherScreen(nav, topBarParams)
     }
+    composable<PebbleNavBarRoutes.CannedRepliesRoute> {
+        CannedRepliesScreen(nav, topBarParams)
+    }
     composable<PebbleNavBarRoutes.AppstoreSettingsRoute> {
         AppstoreSettingsScreen(nav, topBarParams)
     }
     composable<PebbleNavBarRoutes.OfflineModelsRoute> {
         ModelManagementScreen(nav, topBarParams)
+    }
+    composableWithAnimations<PebbleNavBarRoutes.WatchSettingsCategoryRoute>(viewModel) {
+        val route: PebbleNavBarRoutes.WatchSettingsCategoryRoute = it.toRoute()
+        WatchSettingsCategoryScreen(
+            nav,
+            topBarParams,
+            Section.valueOf(route.section),
+            TopLevelType.valueOf(route.topLevelType),
+        )
     }
 }
 

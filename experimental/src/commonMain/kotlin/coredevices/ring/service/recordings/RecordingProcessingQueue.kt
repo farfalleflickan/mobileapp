@@ -16,7 +16,6 @@ import coredevices.ring.storage.RecordingStorage
 import coredevices.util.queue.PersistentQueueScheduler
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.IO
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
@@ -24,9 +23,9 @@ import kotlinx.serialization.json.encodeToJsonElement
 import kotlinx.serialization.json.jsonObject
 import org.koin.core.component.KoinComponent
 import org.koin.core.component.get
-import kotlin.coroutines.cancellation.CancellationException
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.minutes
+import kotlin.time.Instant
 
 class RecordingProcessingQueue(
     private val recordingStorage: RecordingStorage,
@@ -35,12 +34,15 @@ class RecordingProcessingQueue(
     private val queueTaskRepository: RecordingProcessingTaskRepository,
     private val recordingOperationFactory: RecordingOperationFactory,
     private val scope: RecordingBackgroundScope,
+    private val recordingPreprocessor: RecordingPreprocessor,
     rescheduleDelay: Duration = 1.minutes,
+    maxConcurrency: Int = 20,
 ): KoinComponent, PersistentQueueScheduler<RecordingProcessingTask>(
     repository = queueTaskRepository,
     scope = scope,
     label = "RecordingProcessing",
-    rescheduleDelay = rescheduleDelay
+    rescheduleDelay = rescheduleDelay,
+    maxConcurrency = maxConcurrency,
 ) {
     companion object {
         private val logger = Logger.withTag("RecordingProcessingQueue")
@@ -78,13 +80,10 @@ class RecordingProcessingQueue(
         transferId: Long?,
         buttonSequence: String?
     ) {
-        scope.launch(Dispatchers.IO) {
-            try {
-                recordingStorage.persistRecording(fileId)
-            } catch (e: Exception) {
-                //TODO: Better sync handling, e.g. retry later
-                logger.e(e) { "Error persisting recording $fileId" }
-            }
+        try {
+            recordingPreprocessor.preprocess(fileId)
+        } catch (e: Exception) {
+            logger.e(e) { "Preprocessing failed for file $fileId: ${e.message}, skipping preprocessing" }
         }
         val operation = recordingOperationFactory.createForButtonSequence(
             recordingId = recordingId,
@@ -127,7 +126,9 @@ class RecordingProcessingQueue(
         val recordingId = if (handle.stage is RecordingProcessingStage.RecordingEntityCreated) {
             (handle.stage as RecordingProcessingStage.RecordingEntityCreated).recordingEntityId
         } else {
-            val id = recordingRepository.createRecording()
+            val id = recordingRepository.createRecording(
+                localTimestamp = transfer.transferInfo?.buttonPressed?.let { Instant.fromEpochMilliseconds(it) } ?: task.created
+            )
             queueTaskRepository.updateTaskRecordingId(
                 taskId = handle.taskId,
                 recordingId = id
@@ -174,7 +175,9 @@ class RecordingProcessingQueue(
     }
 
     private suspend fun scheduleTask(task: RecordingProcessingTask): Long {
-        val id = queueTaskRepository.insertTask(task)
+        val id = withContext(Dispatchers.IO) {
+            queueTaskRepository.insertTask(task)
+        }
         super.scheduleTask(id)
         return id
     }

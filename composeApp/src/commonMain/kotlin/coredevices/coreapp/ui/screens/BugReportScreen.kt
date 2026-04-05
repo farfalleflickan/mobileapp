@@ -44,6 +44,7 @@ import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ElevatedCard
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.IconButtonDefaults
@@ -77,6 +78,7 @@ import coredevices.pebble.ui.TopBarIconButtonWithToolTip
 import coredevices.ui.CoreLinearProgressIndicator
 import coredevices.ui.PebbleElevatedButton
 import coredevices.ui.SignInDialog
+import coredevices.util.CoreConfigFlow
 import coredevices.util.Platform
 import coredevices.util.emailOrNull
 import coredevices.util.isIOS
@@ -86,10 +88,14 @@ import dev.gitlive.firebase.auth.auth
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
+import kotlinx.io.buffered
+import kotlinx.io.files.Path
+import kotlinx.io.files.SystemFileSystem
 import org.jetbrains.compose.resources.stringResource
 import org.koin.compose.koinInject
 import rememberOpenDocumentLauncher
 import rememberOpenPhotoLauncher
+import size
 
 expect fun isThirdPartyTest(): Boolean
 expect fun getExperimentalDebugInfoDirectory(): String
@@ -112,9 +118,13 @@ fun BugReportScreen(
     coreNav: CoreNav,
     pebble: Boolean,
     recordingPath: String?,
+    screenshotPath: String?,
 ) {
     Box(modifier = Modifier.background(MaterialTheme.colorScheme.background)) {
         val platform = koinInject<Platform>()
+        var isWatch by remember { mutableStateOf(pebble) }
+        val coreConfigFlow: CoreConfigFlow = koinInject()
+        val coreConfig by coreConfigFlow.flow.collectAsState()
         val bugReportProcessor = koinInject<BugReportProcessor>()
         val nextBugReportContext = koinInject<NextBugReportContext>()
         val (userMessage, setUserMessage) = remember { mutableStateOf("") }
@@ -185,10 +195,28 @@ fun BugReportScreen(
                     attachments = attachments ?: emptyList(),
                     sendRecording = sendRecording,
                     expOutputPath = recordingPath,
-                    imageAttachments = imageAttachments ?: emptyList(),
-                    fetchPebbleLogs = pebble,
-                    fetchPebbleCoreDump = pebble,
-                    includeExperimentalDebugInfo = !pebble,
+                    imageAttachments = (imageAttachments ?: emptyList()) +
+                            if (screenshotPath != null) {
+                                try {
+                                    val screenshotFile = Path(screenshotPath)
+                                    listOf(
+                                        DocumentAttachment(
+                                            fileName = "watch-screenshot.png",
+                                            mimeType = "image/png",
+                                            source = SystemFileSystem.source(screenshotFile)
+                                                .buffered(),
+                                            size = screenshotFile.size(),
+                                        )
+                                    )
+                                } catch (_: Exception) {
+                                    emptyList()
+                                }
+                            } else {
+                                emptyList()
+                            },
+                    fetchPebbleLogs = isWatch,
+                    fetchPebbleCoreDump = isWatch,
+                    includeExperimentalDebugInfo = !isWatch,
                     shareLocally = shareLocally,
                 )
 
@@ -345,6 +373,24 @@ fun BugReportScreen(
                         capitalization = KeyboardCapitalization.Sentences
                     )
                 )
+                if (coreConfig.enableIndex) {
+                    Text("This is a:", modifier = Modifier.padding(top = 8.dp))
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        modifier = Modifier.padding(horizontal = 16.dp)
+                    ) {
+                        FilterChip(
+                            selected = !isWatch,
+                            onClick = { isWatch = false },
+                            label = { Text("Index bug") }
+                        )
+                        FilterChip(
+                            selected = isWatch,
+                            onClick = { isWatch = true },
+                            label = { Text("Watch bug") }
+                        )
+                    }
+                }
                 if (user == null) {
                     Text(
                         "You must sign in to submit a bug report",

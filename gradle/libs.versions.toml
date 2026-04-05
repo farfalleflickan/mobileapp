@@ -53,8 +53,9 @@ coredevices-speex = "1946c84"
 mcp = "0.8.3"
 glance = "1.1.1"
 #noinspection GradleDependency
-coredevices-haversine = "79c4158"
+coredevices-haversine = "8e536c0"
 #noinspection GradleDependency
+coredevices-krisp = "811c72e"
 junit-ext = "1.3.0"
 paging = "3.4.0-alpha04"
 reorderable = "3.0.0"
@@ -138,6 +139,7 @@ firebase-bom = { group = "com.google.firebase", name = "firebase-bom", version.r
 firebase-auth = { group = "dev.gitlive", name = "firebase-auth", version.ref = "firebase-kotlin" }
 firebase-firestore = { group = "dev.gitlive", name = "firebase-firestore", version.ref = "firebase-kotlin" }
 firebase-crashlytics = { group = "dev.gitlive", name = "firebase-crashlytics", version.ref = "firebase-kotlin" }
+firebase-crashlytics-ndk = { group = "com.google.firebase", name = "firebase-crashlytics-ndk" }
 firebase-storage = { group = "dev.gitlive", name = "firebase-storage", version.ref = "firebase-kotlin" }
 kmpnotifier = { group = "io.github.mirzemehdi", name = "kmpnotifier", version.ref = "kmpnotifier" }
 mixpanel-android = { module = "com.mixpanel.android:mixpanel-android", version.ref = "mixpanel-android" }
@@ -162,3 +164,4 @@ compass-geocoder = { module = "dev.jordond.compass:geocoder", version.ref = "com
 compass-geocoder-mobile = { module = "dev.jordond.compass:geocoder-mobile", version.ref = "compass" }
 compass-autocomplete = { module = "dev.jordond.compass:autocomplete", version.ref = "compass" }
 compass-autocomplete-mobile = { module = "dev.jordond.compass:autocomplete-mobile", version.ref = "compass" }
+coredevices-krispPrivate = { group = "coredevices.krispkmp", name = "library", version.ref = "coredevices-krisp" }

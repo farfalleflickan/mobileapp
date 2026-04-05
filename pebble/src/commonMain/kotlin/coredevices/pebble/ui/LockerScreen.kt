@@ -97,6 +97,7 @@ import coredevices.pebble.services.AppStoreHomeResult
 import coredevices.pebble.services.PebbleWebServices
 import coredevices.pebble.services.SearchPagingSource
 import coredevices.pebble.services.StoreCategory
+import coredevices.ui.PebbleElevatedButton
 import io.rebble.libpebblecommon.connection.AppContext
 import io.rebble.libpebblecommon.connection.LibPebble
 import io.rebble.libpebblecommon.connection.ConnectedPebbleDevice
@@ -375,16 +376,23 @@ fun LockerScreen(
                             }
                         }
                     }?.collectAsLazyPagingItems()
+                    val hasUnfilteredStoreResults = (remember(viewModel.searchPager, lockerUuids) {
+                        viewModel.searchPager?.map { pagingData ->
+                            pagingData.filter { app -> app.uuid !in lockerUuids }
+                        }
+                    }?.collectAsLazyPagingItems()?.itemCount ?: 0) > 0
 
                     Column {
                         SearchResultsList(
                             lockerEntries = lockerEntries,
                             storeResults = filteredStoreResults,
+                            hasUnfilteredStoreResults = hasUnfilteredStoreResults,
                             navBarNav = navBarNav,
                             topBarParams = topBarParams,
                             lazyListState = searchListState,
                             modifier = Modifier.weight(1f),
                             appType = viewModel.type.value,
+                            sharedViewModel = sharedViewModel,
                         )
                     }
                 } else {
@@ -396,6 +404,22 @@ fun LockerScreen(
                                 lockerEntries.filter {
                                             it.showOnMainLockerScreen() &&
                                             (it.uuid != activeWatchface.uuid || it.uuid != lockerEntries.first().uuid)
+                                }
+                            }
+                        }
+
+                        // For each feed, track which app IDs and UUIDs appear in higher-priority feeds
+                        // so duplicates can be excluded from lower feeds.
+                        val seenInHigherFeeds = remember(storeHome) {
+                            val seenStoreIds = mutableSetOf<String>()
+                            val seenUuids = mutableSetOf<String>()
+                            buildMap<Int, Pair<Set<String>, Set<String>>> {
+                                storeHome.forEach { display ->
+                                    put(display.source.id, Pair(seenStoreIds.toSet(), seenUuids.toSet()))
+                                    display.home.applications.forEach { app ->
+                                        seenStoreIds.add(app.id)
+                                        app.uuid?.let { seenUuids.add(it) }
+                                    }
                                 }
                             }
                         }
@@ -561,6 +585,7 @@ fun LockerScreen(
                                     home.collections,
                                     contentType = { "app_carousel_collection" },
                                     key = { "collection_${source.id}_${it.slug}" }) { collection ->
+                                    val (excludedStoreIds, excludedUuids) = seenInHigherFeeds[source.id] ?: Pair(emptySet<String>(), emptySet<String>())
                                     val collectionApps =
                                         remember(
                                             home,
@@ -570,6 +595,8 @@ fun LockerScreen(
                                             sharedViewModel.showScaled.value,
                                             viewModel.type.value,
                                             sharedViewModel.hearted.value,
+                                            excludedStoreIds,
+                                            excludedUuids,
                                         ) {
                                             collection.applicationIds.mapNotNull { appId ->
                                                 home.applications.find { app ->
@@ -583,7 +610,9 @@ fun LockerScreen(
                                             }.filter { app ->
                                                 app.type == viewModel.type.value &&
                                                         (sharedViewModel.showScaled.value || app.isNativelyCompatible) &&
-                                                (!sharedViewModel.hearted.value || currentHearts.hasHeart(sourceId = app.appstoreSource?.id, appId = app.storeId))
+                                                (!sharedViewModel.hearted.value || currentHearts.hasHeart(sourceId = app.appstoreSource?.id, appId = app.storeId)) &&
+                                                app.storeId !in excludedStoreIds &&
+                                                app.uuid.toString() !in excludedUuids
                                             }
                                                 .distinctBy { it.uuid }
                                         }
@@ -664,11 +693,13 @@ fun String.toColorKmp(): Color {
 fun SearchResultsList(
     lockerEntries: List<CommonApp>,
     storeResults: LazyPagingItems<CommonApp>?,
+    hasUnfilteredStoreResults: Boolean,
     navBarNav: NavBarNav,
     topBarParams: TopBarParams,
     lazyListState: LazyListState,
     modifier: Modifier = Modifier,
     appType: AppType,
+    sharedViewModel: SharedLockerViewModel,
 ) {
     val scope = rememberCoroutineScope()
     val isLoadingFirstPage = storeResults == null || (storeResults.loadState.refresh is LoadState.Loading && storeResults.itemCount == 0)
@@ -683,7 +714,7 @@ fun SearchResultsList(
                 item(span = { GridItemSpan(maxLineSpan) }) { SectionHeader("From my watchfaces") }
                 items(
                     items = lockerEntries,
-                    key = { "${it.storeId}-${it.uuid}" },
+                    key = { "locker_${it.storeId}-${it.uuid}" },
                 ) { entry ->
                     NativeWatchfaceCard(
                         entry,
@@ -704,7 +735,7 @@ fun SearchResultsList(
             } else {
                 items(
                     count = storeResults.itemCount,
-                    key = storeResults.itemKey { "${it.storeId}-${it.uuid}" },
+                    key = storeResults.itemKey { "store_${it.storeId}-${it.uuid}" },
                 ) { index ->
                     storeResults[index]?.let { entry ->
                         NativeWatchfaceCard(
@@ -722,6 +753,18 @@ fun SearchResultsList(
                             CircularProgressIndicator()
                         }
                     }
+                } else if (storeResults.itemCount == 0 && hasUnfilteredStoreResults) {
+                    item(span = { GridItemSpan(maxLineSpan) }) {
+                        PebbleElevatedButton(
+                            text = "Clear filters for more results",
+                            onClick = {
+                                sharedViewModel.hearted.value = false
+                                sharedViewModel.showScaled.value = true
+                                sharedViewModel.showIncompatible.value = true
+                            },
+                            primaryColor = true,
+                        )
+                    }
                 }
             }
         }
@@ -738,7 +781,7 @@ fun SearchResultsList(
                 }
                 items(
                     items = lockerEntries,
-                    key = { it.uuid }
+                    key = { "locker_${it.uuid}" }
                 ) { entry ->
                     NativeWatchfaceListItem(
                         entry,
@@ -773,7 +816,7 @@ fun SearchResultsList(
             } else {
                 items(
                     count = storeResults!!.itemCount,
-                    key = storeResults.itemKey { it.uuid.toString() },
+                    key = storeResults.itemKey { "store_${it.uuid}" },
                 ) { index ->
                     storeResults[index]?.let { entry ->
                         NativeWatchfaceListItem(
@@ -799,6 +842,18 @@ fun SearchResultsList(
                         Box(modifier = Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
                             CircularProgressIndicator()
                         }
+                    }
+                } else if (storeResults.itemCount == 0 && hasUnfilteredStoreResults) {
+                    item {
+                        PebbleElevatedButton(
+                            text = "Clear filters for more results",
+                            onClick = {
+                                sharedViewModel.hearted.value = false
+                                sharedViewModel.showScaled.value = true
+                                sharedViewModel.showIncompatible.value = true
+                            },
+                            primaryColor = true,
+                        )
                     }
                 }
             }

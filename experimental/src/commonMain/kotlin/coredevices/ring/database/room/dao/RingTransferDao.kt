@@ -29,6 +29,9 @@ interface RingTransferDao {
     @Query("SELECT * FROM RingTransfer WHERE isCurrentIndexIteration = 1 AND transferInfo_collectionStartIndex = :startIndex")
     suspend fun getValidTransfersByStartIndex(startIndex: Int): List<RingTransfer>
 
+    @Query("SELECT * FROM RingTransfer WHERE isCurrentIndexIteration = 1 AND transferInfo_collectionStartIndex >= :startIndex AND transferInfo_collectionStartIndex <= :endIndex")
+    suspend fun getValidTransfersByRange(startIndex: Int, endIndex: Int): List<RingTransfer>
+
     @Query("UPDATE RingTransfer SET isCurrentIndexIteration = 0 WHERE isCurrentIndexIteration = 1")
     suspend fun markTransfersAsPreviousIndexIteration()
 
@@ -72,7 +75,7 @@ interface RingTransferDao {
         (:includeDiscarded OR transfer_id IS NULL OR transfer_status != 'Discarded')
         AND
         (transfer_id IS NOT NULL OR feedItem_rootRecordingId IS NOT NULL)
-        ORDER BY COALESCE(transfer_createdAt, feedItem_localTimestamp) DESC
+        ORDER BY COALESCE(feedItem_localTimestamp, transfer_createdAt) DESC
     """)
     fun getPaginatedTransfersWithFeedItem(includeDiscarded: Boolean): PagingSource<Int, RingTransferFeedItem>
 

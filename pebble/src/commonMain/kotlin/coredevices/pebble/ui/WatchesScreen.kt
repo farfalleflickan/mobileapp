@@ -1,5 +1,6 @@
 package coredevices.pebble.ui
 
+import NextBugReportContext
 import PlatformShareLauncher
 import PlatformUiContext
 import androidx.compose.animation.core.LinearEasing
@@ -42,8 +43,10 @@ import androidx.compose.material.icons.filled.Battery4Bar
 import androidx.compose.material.icons.filled.Battery5Bar
 import androidx.compose.material.icons.filled.Battery6Bar
 import androidx.compose.material.icons.filled.BatteryFull
+import androidx.compose.material.icons.filled.BugReport
 import androidx.compose.material.icons.filled.Cancel
 import androidx.compose.material.icons.filled.ChevronRight
+import androidx.compose.material.icons.filled.Error
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.NetworkPing
 import androidx.compose.material.icons.filled.NotificationAdd
@@ -134,6 +137,7 @@ import io.rebble.libpebblecommon.connection.ConnectedPebble
 import io.rebble.libpebblecommon.connection.ConnectedPebbleDevice
 import io.rebble.libpebblecommon.connection.ConnectedPebbleDeviceInRecovery
 import io.rebble.libpebblecommon.connection.ConnectingPebbleDevice
+import io.rebble.libpebblecommon.connection.ConnectionFailureReason
 import io.rebble.libpebblecommon.connection.DisconnectingPebbleDevice
 import io.rebble.libpebblecommon.connection.DiscoveredPebbleDevice
 import io.rebble.libpebblecommon.connection.FirmwareUpdateCheckResult
@@ -150,9 +154,15 @@ import io.rebble.libpebblecommon.packets.blobdb.TimelineItem
 import io.rebble.libpebblecommon.services.blobdb.TimelineActionResult
 import io.rebble.libpebblecommon.timeline.TimelineColor
 import io.rebble.libpebblecommon.timeline.toPebbleColor
+import io.rebble.libpebblecommon.util.getTempFilePath
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.GlobalScope
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import kotlinx.io.buffered
+import kotlinx.io.files.SystemFileSystem
+import kotlinx.io.writeString
 import kotlinx.serialization.ExperimentalSerializationApi
 import kotlinx.serialization.Serializable
 import org.jetbrains.compose.resources.stringResource
@@ -417,8 +427,7 @@ private fun NicknameDialog(watch: KnownPebbleDevice, onDismissRequest: () -> Uni
     var nickname by remember { mutableStateOf(watch.nickname) }
     val focusRequester = remember { FocusRequester() }
 
-    // Re-initialize TextFieldValue whenever 'nickname' state changes
-    var textFieldValue by remember(nickname) {
+    var textFieldValue by remember {
         mutableStateOf(TextFieldValue(nickname ?: watch.name))
     }
 
@@ -460,7 +469,7 @@ private fun NicknameDialog(watch: KnownPebbleDevice, onDismissRequest: () -> Uni
                         IconButton(
                             onClick = {
                                 nickname = null
-                                // nickname change triggers LaunchedEffect above
+                                textFieldValue = TextFieldValue(watch.name)
                             },
                         ) {
                             Icon(Icons.Default.Cancel, contentDescription = "Remove Nickname")
@@ -577,6 +586,8 @@ private fun PebbleDevice.isActive(): Boolean = when (this) {
 }
 
 expect fun postTestNotification(appContext: AppContext)
+
+expect fun ImageBitmap.toPngBytes(): ByteArray
 
 @Composable
 fun WatchItem(
@@ -997,7 +1008,7 @@ fun WatchMenu(watch: PebbleDevice, navBarNav: NavBarNav) {
         NicknameDialog(watch, onDismissRequest = { showRenameDialog = false })
     }
     if (showScreenshotDialog && watch is ConnectedPebble.Screenshot) {
-        ScreenshotDialog(watch, onDismissRequest = { showScreenshotDialog = false })
+        ScreenshotDialog(watch, onDismissRequest = { showScreenshotDialog = false }, navBarNav)
     }
     if (showLanguageDialog && watch is ConnectedPebbleDevice) {
         LanguageDialog(watch, onDismissRequest = { showLanguageDialog = false })
@@ -1210,9 +1221,11 @@ fun LanguageDialog(watch: ConnectedPebbleDevice, onDismissRequest: () -> Unit) {
 }
 
 @Composable
-fun ScreenshotDialog(watch: ConnectedPebble.Screenshot, onDismissRequest: () -> Unit) {
+fun ScreenshotDialog(watch: ConnectedPebble.Screenshot, onDismissRequest: () -> Unit, navBarNav: NavBarNav) {
     var screenshot by remember { mutableStateOf<ImageBitmap?>(null) }
     val scope = rememberCoroutineScope()
+    val nextBugReportContext: NextBugReportContext = koinInject()
+    val appContext: AppContext = koinInject()
 
     suspend fun takeScreenshot() {
         screenshot = null
@@ -1236,6 +1249,10 @@ fun ScreenshotDialog(watch: ConnectedPebble.Screenshot, onDismissRequest: () -> 
                 if (screenshot == null) {
                     CircularProgressIndicator(modifier = Modifier.align(Alignment.CenterHorizontally))
                 } else {
+                    IconButton(onClick = { scope.launch { takeScreenshot() } }) {
+                        Icon(Icons.Default.Refresh, contentDescription = null)
+                    }
+
                     ElevatedCard(
                         shape = CutCornerShape(0.dp),
                         elevation = CardDefaults.cardElevation(
@@ -1253,14 +1270,34 @@ fun ScreenshotDialog(watch: ConnectedPebble.Screenshot, onDismissRequest: () -> 
                     }
 
                     FlowRow(
-                        horizontalArrangement = androidx.compose.foundation.layout.Arrangement.Center,
+                        horizontalArrangement = Arrangement.Center,
                         modifier = Modifier.fillMaxWidth(),
                     ) {
                         PebbleElevatedButton(
-                            text = "Refresh",
-                            onClick = { scope.launch { takeScreenshot() } },
-                            icon = Icons.Default.Refresh,
-                            primaryColor = true,
+                            text = "Bug Report",
+                            onClick = {
+                                nextBugReportContext.nextContext = null
+                                scope.launch {
+                                    val tempScreenshotFile = withContext(Dispatchers.Default) {
+                                        val file = getTempFilePath(
+                                            appContext,
+                                            "watch-screenshot.png"
+                                        )
+                                        SystemFileSystem.sink(file, append = false).buffered().use { sink ->
+                                            sink.write(screenshot.toPngBytes())
+                                        }
+                                        file
+                                    }
+                                    navBarNav.navigateTo(
+                                        CommonRoutes.BugReport(
+                                            pebble = true,
+                                            screenshotPath = tempScreenshotFile.toString(),
+                                        )
+                                    )
+                                }
+                            },
+                            icon = Icons.Default.BugReport,
+                            primaryColor = false,
                             modifier = Modifier.padding(5.dp),
                         )
 
@@ -1460,6 +1497,28 @@ fun WatchDetails(
                 modifier = Modifier.padding(15.dp)
             )
         }
+    }
+    if (watch !is CommonConnectedDevice && watch.connectionFailureInfo?.reason == ConnectionFailureReason.CreateBondFailed) {
+        var showPairingErrorDialog by remember { mutableStateOf(false) }
+        if (showPairingErrorDialog) {
+            AlertDialog(
+                onDismissRequest = { showPairingErrorDialog = false },
+                title = { Text("Error Pairing") },
+                text = { Text("Please go to system bluetooth settings, and unpair this device") },
+                confirmButton = {
+                    TextButton(onClick = { showPairingErrorDialog = false }) { Text("OK") }
+                }
+            )
+        }
+        PebbleElevatedButton(
+            text = "Error Pairing",
+            icon = Icons.Default.Error,
+            onClick = {
+                showPairingErrorDialog = true
+            },
+            primaryColor = true,
+            modifier = Modifier.padding(vertical = 5.dp),
+        )
     }
     Row {
         Box(modifier = Modifier.weight(1f)) {

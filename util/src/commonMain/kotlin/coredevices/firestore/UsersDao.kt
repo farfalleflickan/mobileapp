@@ -1,13 +1,17 @@
 package coredevices.firestore
 
 import co.touchlab.kermit.Logger
+import com.russhwolf.settings.Settings
+import com.russhwolf.settings.set
 import dev.gitlive.firebase.Firebase
 import dev.gitlive.firebase.auth.auth
 import dev.gitlive.firebase.firestore.FirebaseFirestore
 import kotlinx.coroutines.GlobalScope
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.withContext
+import kotlin.time.Duration.Companion.seconds
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.catch
@@ -33,6 +37,7 @@ interface UsersDao {
         todoBlockId: String
     )
     suspend fun initUserDevToken(rebbleUserToken: String?)
+    suspend fun updateLastConnectedWatch(serial: String)
     fun init()
 }
 
@@ -41,23 +46,46 @@ data class PebbleUser(
     val user: User,
 )
 
-class UsersDaoImpl(db: FirebaseFirestore): CollectionDao("users", db), UsersDao {
+class UsersDaoImpl(dbProvider: () -> FirebaseFirestore, private val settings: Settings): CollectionDao("users", dbProvider), UsersDao {
     private val userDoc get() = authenticatedId?.let { db.document(it) }
     private val logger = Logger.withTag("UsersDaoImpl")
 
     private val _user = MutableSharedFlow<PebbleUser?>(replay = 1)
     override val user: Flow<PebbleUser?> = _user.asSharedFlow()
 
+    private var hadNonAnonymousAccount: Boolean
+        get() = settings.getBoolean(KEY_HAD_NON_ANONYMOUS_ACCOUNT, false)
+        set(value) { settings[KEY_HAD_NON_ANONYMOUS_ACCOUNT] = value }
+
+    // True only during initial startup, before we've seen the first non-null user.
+    // Prevents the long delay from applying on explicit sign-out.
+    private var isInitialStartup = true
+
     override fun init() {
         GlobalScope.launch {
-            // Wait for Firebase to restore persisted auth state before proceeding
-            Firebase.auth.authStateChanged.first()
             Firebase.auth.authStateChanged
                 .onStart { emit(Firebase.auth.currentUser) }
                 .distinctUntilChanged { old, new -> old?.uid == new?.uid }
                 .flatMapLatest { firebaseUser ->
                     logger.v { "User changed: $firebaseUser" }
                     if (firebaseUser == null) {
+                        if (isInitialStartup) {
+                            val delayDuration = if (hadNonAnonymousAccount) {
+                                10.seconds // Process restart, had real account
+                            } else {
+                                2.seconds // Process restart, fresh install
+                            }
+                            logger.i { "User is null, hadNonAnonymousAccount=$hadNonAnonymousAccount, isInitialStartup=$isInitialStartup, delay=$delayDuration before anonymous sign-in" }
+                            // Firebase may emit null briefly on process start before it finishes
+                            // loading persisted auth state from disk. Delay here so flatMapLatest
+                            // can cancel us if the real user arrives, avoiding a spurious signInAnonymously()
+                            // that would clobber a real account with a fresh anonymous one.
+                            // Use a longer delay if user previously had a real account, as Firebase
+                            // auth restoration can be slow after process kills.
+                            delay(delayDuration)
+                            logger.w { "Delay expired without real user arriving (hadNonAnonymousAccount=$hadNonAnonymousAccount), falling back to anonymous sign-in" }
+                        }
+                        hadNonAnonymousAccount = false
                         _user.emit(null)
                         logger.i { "Logging into firebase anonymously" }
                         try {
@@ -71,6 +99,11 @@ class UsersDaoImpl(db: FirebaseFirestore): CollectionDao("users", db), UsersDao 
                         }
                         flowOf(null)
                     } else {
+                        isInitialStartup = false
+                        if (!firebaseUser.isAnonymous) {
+                            logger.i { "Non-anonymous user restored/signed in, setting hadNonAnonymousAccount=true" }
+                            hadNonAnonymousAccount = true
+                        }
                         val docRef = db.document("users/${firebaseUser.uid}")
                         docRef.snapshots
                             .onEach { snapshot ->
@@ -133,7 +166,20 @@ class UsersDaoImpl(db: FirebaseFirestore): CollectionDao("users", db), UsersDao 
             userDoc?.update(mapOf("rebble_user_token" to rebbleUserToken))
         }
     }
+
+    override suspend fun updateLastConnectedWatch(serial: String) {
+        val user = user.first()
+        if (user == null) {
+            logger.w { "updateLastConnectedWatch: user is null" }
+            return
+        }
+        if (user.user.lastConnectedWatch != serial) {
+            userDoc?.update(mapOf("last_connected_watch" to serial))
+        }
+    }
 }
+
+private const val KEY_HAD_NON_ANONYMOUS_ACCOUNT = "had_non_anonymous_account"
 
 fun generateRandomUserToken(): String {
     val charPool = "0123456789abcdef"
